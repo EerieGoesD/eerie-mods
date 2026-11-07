@@ -8,7 +8,7 @@ Mods for several games. Each game has its own folder, and each mod has its own R
 | --- | --- |
 | [Cuphead](cuphead) | No Flashing |
 | [Melvor Idle](melvor-idle) | Synergy Guard, Skill Limit, Auto Equip, Time Warp, Shop Filter, Unlimited Bank, Bank Gear Filter, Fight Advisor, Gear Planner |
-| [Pro Evolution Soccer 5](pes5) | Overall Rating |
+| [Pro Evolution Soccer 5](pes5) | Overall Rating, Optimal Formation, Real Names |
 
 Borderlands mods are in [borderlands-1-goty-mods](https://github.com/EerieGoesD/borderlands-1-goty-mods).
 
