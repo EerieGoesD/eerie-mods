@@ -9,5 +9,5 @@ Each mod is a PCSX2 patch file (`.pnach`). It goes in PCSX2's `patches` folder a
 | Mod | Description |
 | --- | --- |
 | [OverallRating](OverallRating) | Adds an Overall rating for every player and team. |
-| [OptimalFormation](OptimalFormation) | Adds Optimal Formation to the formation screen menu: the best formation and starting eleven in one press. |
+| [OptimalSquad](OptimalSquad) | Adds Optimal Squad to the formation screen menu: the best starting eleven by Overall, form or both, with or without changing the formation. |
 | [RealNames](RealNames) | Renames the fake clubs, players, stadiums and competitions to their real names. |
