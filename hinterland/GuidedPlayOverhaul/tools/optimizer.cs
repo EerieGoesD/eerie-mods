@@ -1,4 +1,4 @@
-// Hinterland Guide overlay. F8 shows or hides it.
+// Hinterland Guided Play Overhaul. F8 shows or hides it.
 //
 // A compass and step-by-step guide for all 9 achievements, using the game's own rules
 // decoded from its scripts:
@@ -18,9 +18,11 @@ $Opt::Refresh = 2000;
 // arrow and distance redraw this often (ms); the plan itself every $Opt::Refresh
 $Opt::Fast = 150;
 // the plan is worked out in small pieces, one piece every $Opt::SliceGap ms, each piece
-// stopping after $Opt::SliceBudget ms, so no single frame carries the whole calculation
+// stopping after $Opt::SliceBudget ms, so no single frame carries the whole calculation.
+// 6 ms (was 3, the player: "decrease the calculation times while keeping the accuracy"): the
+// gear totals after a weapon change took 127 s of play at 3 ms
 $Opt::SliceGap = 30;
-$Opt::SliceBudget = 3;
+$Opt::SliceBudget = 6;
 // what the window shows now, so unchanged parts are not laid out again
 $Opt::ShownIdx = -2;
 $Opt::Top = 110;
@@ -104,9 +106,11 @@ package OptHooksPackage
       %on = $pref::Opt::ScreenWasd;
       %zm = $pref::Opt::WheelZoom;
       if (%on) { OptWasdBind(0); }
+      OptArrowBind(0);
       if (%zm && isObject(moveMap)) { moveMap.unbind(mouse, zaxis); }
       Parent::onSleep(%this);
       if (%on) { OptWasdBind(1); }
+      OptArrowBind(1);
       if (%zm && isObject(moveMap)) { moveMap.bind(mouse, zaxis, OptWheel); }
    }
 
@@ -190,7 +194,7 @@ function OptInit()
    if ($Opt::CamBase $= "" && isObject(IsoCameraData)) { $Opt::CamBase = IsoCameraData.Offset; }
    if ($Opt::TownCamBase $= "" && isObject(IsoCameraData)) { $Opt::TownCamBase = IsoCameraData.TownOffset; }
    OptTownZoomApply(OptTownZoom(), 1);
-   if ($pref::Opt::ScreenWasd) { OptWasdBind(1); }
+   if ($pref::Opt::ScreenWasd) { OptWasdBind(1); } else { OptArrowBind(1); }
    if ($pref::Opt::WheelZoom) { OptZoomBind(1); }
    OptLootSetMake();
    if (!$Opt::HooksOn)
@@ -199,6 +203,7 @@ function OptInit()
       $Opt::HooksOn = 1;
    }
    GlobalActionMap.bindCmd(keyboard, "F8", "OptToggle();", "");
+   GlobalActionMap.bindCmd(keyboard, "F7", "OptAutoKey();", "");
    cancel($Opt::Schedule);
    $Opt::Schedule = schedule($Opt::Refresh, 0, OptTick);
    cancel($Opt::FastSchedule);
@@ -352,7 +357,7 @@ function OptCreateGui()
          HorizSizing = "left";
          VertSizing = "bottom";
          position = "0" SPC $Opt::Top - 58;
-         Extent = "372 28";
+         Extent = "492 28";
          Visible = 1;
          new GuiCheckBoxCtrl(OptAutoAttackBox)
          {
@@ -387,16 +392,66 @@ function OptCreateGui()
             buttonType = "ToggleButton";
             Command = "OptTicksChanged();";
          };
+         new GuiCheckBoxCtrl(OptPotionBox)
+         {
+            Profile = "OptCheckProfile";
+            HorizSizing = "right";
+            VertSizing = "bottom";
+            position = "369 4";
+            Extent = "117 20";
+            text = "Auto Potion";
+            buttonType = "ToggleButton";
+            Command = "OptTicksChanged();";
+         };
       };
       OptAutoAttackBox.setValue($pref::Opt::AutoAttack ? 1 : 0);
       OptWasdBox.setValue($pref::Opt::ScreenWasd ? 1 : 0);
       OptZoomBox.setValue($pref::Opt::WheelZoom ? 1 : 0);
+      OptPotionBox.setValue($pref::Opt::AutoPotion ? 1 : 0);
       // new bars: placed again on the window's edges at the next draw
+      $Opt::BarRect = "";
+   }
+   // the potion buttons above the tickboxes (OptPotionBarUpdate): the bar's own buttons, the
+   // game's colours as the bars use them
+   if (!isObject(OptButtonProfile))
+   {
+      new GuiControlProfile(OptButtonProfile)
+      {
+         opaque = 1;
+         fillColor = "40 34 22 230";
+         fillColorHL = "90 74 36 240";
+         fillColorNA = "40 34 22 230";
+         border = 1;
+         borderColor = "196 164 92 255";
+         fontType = "Tahoma";
+         fontSize = 14;
+         fontSizeBase = 14;
+         fontColor = "232 232 232";
+         fontColorHL = "255 217 102";
+         justify = "center";
+         canKeyFocus = 0;
+         modal = 1;
+      };
+   }
+   if (!isObject(OptPotionBar))
+   {
+      new GuiControl(OptPotionBar)
+      {
+         Profile = "OptBarProfile";
+         HorizSizing = "left";
+         VertSizing = "bottom";
+         position = "0 0";
+         Extent = "492 28";
+         Visible = 0;
+      };
+      $Opt::PotionSig = "";
+      $Opt::PotionN = 0;
       $Opt::BarRect = "";
    }
    OptOverlay.setVisible($Opt::Visible);
    OptSliderBar.setVisible($Opt::Visible);
    OptTickBar.setVisible($Opt::Visible);
+   OptPotionBar.setVisible($Opt::Visible && $Opt::PotionN > 0);
 }
 
 // a tickbox was clicked: read both, save them, and switch the WASD keys over
@@ -405,9 +460,25 @@ function OptTicksChanged()
    $pref::Opt::AutoAttack = OptAutoAttackBox.getValue() ? 1 : 0;
    $pref::Opt::ScreenWasd = OptWasdBox.getValue() ? 1 : 0;
    $pref::Opt::WheelZoom = OptZoomBox.getValue() ? 1 : 0;
+   $pref::Opt::AutoPotion = OptPotionBox.getValue() ? 1 : 0;
    OptWasdBind($pref::Opt::ScreenWasd);
    OptZoomBind($pref::Opt::WheelZoom);
-   if (!$pref::Opt::AutoAttack) { OptAutoAttackDrop(); }
+   if (!$pref::Opt::AutoAttack)
+   {
+      // ANY CHASE STOPS (the player: unticked, the lord kept running to the enemy on his own):
+      // the one auto-attack started, and any other attack target or step aside still going
+      // always, even with no attack target left: he was stuck attacking with his target already
+      // dead and gone, and a check for a target found nothing to stop
+      OptAutoAttackDrop("auto-attack unticked");
+      if (isObject(MainCharacter))
+      {
+         %t = MainCharacter.getAttackTarget();
+         echo("Opt auto-attack: unticked, attack stopped" @ (isObject(%t) ? " (was on " @ OptCName(%t) @ ")" : ""));
+         MainCharacter.stopAttacking();
+         MainCharacter.setAttackTarget(0);
+         MainCharacter.stop();
+      }
+   }
 }
 
 // WHEEL ZOOM (tickbox). the game's camera sits at your lord + IsoCameraData.Offset ("4.5 -4.5 10"
@@ -491,10 +562,14 @@ function OptTownZoomApply(%k, %now)
 // the keys held make a screen direction (W up, A left, S down, D right), which is turned into
 // the map direction that shows as it (the camera's projection, as the arrow uses), and given to
 // the same move values. unticked, the game's own handlers are bound back
+// ARROW KEYS TOO (the player: "let's make arrows movement also available besides WASD"; the game
+// binds nothing to them): up, left, down and right move like W, A, S and D, ticked or not, each
+// with its own held flag so letting go of one key never stops the other
 function OptWasdBind(%on)
 {
    if (!isObject(moveMap)) { return; }
    $Opt::KeyW = 0; $Opt::KeyA = 0; $Opt::KeyS = 0; $Opt::KeyD = 0;
+   $Opt::KeyUp = 0; $Opt::KeyLeft = 0; $Opt::KeyDown = 0; $Opt::KeyRight = 0;
    $mvForwardAction = 0; $mvBackwardAction = 0; $mvLeftAction = 0; $mvRightAction = 0;
    if (%on)
    {
@@ -510,18 +585,56 @@ function OptWasdBind(%on)
       moveMap.bind(keyboard, s, movebackward);
       moveMap.bind(keyboard, d, moveright);
    }
+   OptArrowBind(1);
+}
+
+// the arrow keys on (the guide's handlers) or off (unbound, as the game has them: closing Options
+// saves moveMap to config.cs, and they must not be left there when the mod is removed)
+function OptArrowBind(%on)
+{
+   if (!isObject(moveMap)) { return; }
+   if (%on)
+   {
+      moveMap.bind(keyboard, "up", OptKeyUp);
+      moveMap.bind(keyboard, "left", OptKeyLeft);
+      moveMap.bind(keyboard, "down", OptKeyDown);
+      moveMap.bind(keyboard, "right", OptKeyRight);
+   }
+   else
+   {
+      moveMap.unbind(keyboard, "up");
+      moveMap.unbind(keyboard, "left");
+      moveMap.unbind(keyboard, "down");
+      moveMap.unbind(keyboard, "right");
+   }
 }
 
 function OptKeyW(%val) { $Opt::KeyW = %val ? 1 : 0; OptWasdApply(); }
 function OptKeyA(%val) { $Opt::KeyA = %val ? 1 : 0; OptWasdApply(); }
 function OptKeyS(%val) { $Opt::KeyS = %val ? 1 : 0; OptWasdApply(); }
 function OptKeyD(%val) { $Opt::KeyD = %val ? 1 : 0; OptWasdApply(); }
+function OptKeyUp(%val) { $Opt::KeyUp = %val ? 1 : 0; OptArrowApply(); }
+function OptKeyLeft(%val) { $Opt::KeyLeft = %val ? 1 : 0; OptArrowApply(); }
+function OptKeyDown(%val) { $Opt::KeyDown = %val ? 1 : 0; OptArrowApply(); }
+function OptKeyRight(%val) { $Opt::KeyRight = %val ? 1 : 0; OptArrowApply(); }
+
+// an arrow key: with Screen WASD ticked it moves along the screen like W/A/S/D (OptWasdApply);
+// unticked, along the map as the game's own W/A/S/D do
+function OptArrowApply()
+{
+   if ($pref::Opt::ScreenWasd) { OptWasdApply(); return; }
+   %sp = ($movementSpeed $= "") ? 1 : $movementSpeed;
+   $mvForwardAction = $Opt::KeyUp * %sp;
+   $mvBackwardAction = $Opt::KeyDown * %sp;
+   $mvRightAction = $Opt::KeyRight * %sp;
+   $mvLeftAction = $Opt::KeyLeft * %sp;
+}
 
 function OptWasdApply()
 {
    if (isObject(gTown)) { gTown.leaveTownView(); }
-   %su = $Opt::KeyW - $Opt::KeyS;
-   %sr = $Opt::KeyD - $Opt::KeyA;
+   %su = OptMax($Opt::KeyW, $Opt::KeyUp) - OptMax($Opt::KeyS, $Opt::KeyDown);
+   %sr = OptMax($Opt::KeyD, $Opt::KeyRight) - OptMax($Opt::KeyA, $Opt::KeyLeft);
    %wx = 0;
    %wy = 0;
    if (%su != 0 || %sr != 0)
@@ -590,11 +703,11 @@ function OptScreenToMap(%right, %up)
 
 // AUTO-ATTACK (tickbox). two jobs:
 // 1. in a fight, when your target is dead (or you have none) and an enemy is still attacking
-//    you, your lord is set on the nearest of those (the ones that joined), until none is left.
-//    while the guide says to run (a lost fight) only HIT BACK (the player's rule): an enemy
-//    attacking you that stands within your weapon's reach (OptLordReach) is struck; one farther
-//    off is never walked to, and a target that falls out of reach is let go without stopping
-//    your run
+//    you, your lord is set on one of those (the ones that joined), until none is left: mages
+//    first, then archers, then melee, the nearest of a kind (OptFoeRank); one of a higher kind
+//    that attacks you also takes the place of the target auto-attack picked (OptAutoAttackBetter).
+//    while the guide says to run or to go to town and heal: only HIT BACK while you stand still
+//    (an enemy attacking you within your weapon's reach), nothing while you move, never a chase
 // 2. out of a fight: while the guide's step is to attack an enemy at a site (an enemy it rated
 //    SAFE or OK, $OptAutoAtk, set by OptHuntShow / OptSiteStep), and you stand inside that
 //    site's 64 m square, your lord is set on that enemy (setAttackTarget, as the game does for
@@ -605,10 +718,45 @@ function OptScreenToMap(%right, %up)
 function OptAutoAttack()
 {
    if (!isObject(MainCharacter) || MainCharacter.getState() $= "Dead") { return; }
+   // THE TARGET AUTO-ATTACK PICKED IS DEAD OR GONE (the player: "stuck in auto-attack, the enemy
+   // is nowhere to be seen"; the Goblin it was on had just been killed): the attack is ended at
+   // once, so your lord is not left attacking nothing
+   if ($Opt::AutoTarget !$= "" && (!isObject($Opt::AutoTarget) || $Opt::AutoTarget.getState() $= "Dead"))
+   {
+      echo("Opt auto-attack: its target is dead or gone, attack ended");
+      $Opt::AutoTarget = "";
+      $Opt::AutoLogged = "";
+      $Opt::UnstickTicks = 0;
+      %t = MainCharacter.getAttackTarget();
+      if (!isObject(%t) || %t.getState() $= "Dead")
+      {
+         MainCharacter.stopAttacking();
+         MainCharacter.setAttackTarget(0);
+      }
+   }
+   // a dead enemy still set as your attack target, whoever set it: ended too
+   %dt = MainCharacter.getAttackTarget();
+   if (isObject(%dt) && %dt.getState() $= "Dead")
+   {
+      echo("Opt auto-attack: your attack target " @ OptCName(%dt) @ " is dead, attack ended");
+      MainCharacter.stopAttacking();
+      MainCharacter.setAttackTarget(0);
+   }
    if (OptLordInTown())
    {
+      // RAIDERS IN TOWN, STOOD STILL (the player: "the raiders came to attack the town, auto-attack
+      // is doing nothing, my character is just standing still"; it had picked a raider 20 m away
+      // across the town). the stuck check (OptUnstick) only ran outside town: in town, among the
+      // buildings and fences, a lord pressed against one stayed there. now it runs here too, and
+      // a step aside under way is not undone by a new pick
+      if ($Opt::UnstickTicks > 0) { OptUnstick(0); return; }
       %t = MainCharacter.getAttackTarget();
-      if (isObject(%t) && %t.getState() !$= "Dead" && OptIsRaider(%t)) { return; }
+      if (isObject(%t) && %t.getState() !$= "Dead" && OptIsRaider(%t))
+      {
+         if (OptUnstick(%t)) { return; }
+         OptAutoAttackBetter(%t, 1);
+         return;
+      }
       OptAutoAttackDrop();
       %t = MainCharacter.getAttackTarget();
       if (isObject(%t) && %t.getState() !$= "Dead") { return; }
@@ -617,21 +765,49 @@ function OptAutoAttack()
       return;
    }
    %t = MainCharacter.getAttackTarget();
-   if (strstr($OptLastTitle, "Run") == 0)
+   // RUNNING OR WALKING BACK TO HEAL. two player rules: "the game is chasing an enemy I had to run
+   // from" and "I'm being attacked and the hero doesn't attack back". so while you stand still,
+   // an enemy attacking you within your weapon's reach (OptLordReach) is hit back; while you
+   // move (W/A/S/D held, or your lord walking on your click: more than 0.3 m since the last
+   // tick, 150 ms, while not getting closer to the target) nothing is picked and auto-attack's
+   // own target is let go, and one that falls out of reach is let go too: never walked after
+   if (strstr($OptLastTitle, "Run") == 0 || strstr($OptLastTitle, "Go to town and heal") == 0)
    {
+      %p = MainCharacter.getPosition();
+      %mv = ($Opt::RunPos $= "") ? 0 : OptDist2D(%p, $Opt::RunPos);
+      $Opt::RunPos = %p;
+      %keys = $mvForwardAction != 0 || $mvBackwardAction != 0 || $mvLeftAction != 0 || $mvRightAction != 0;
       %reach = OptLordReach();
       if (isObject(%t) && %t.getState() !$= "Dead")
       {
-         if ($Opt::AutoTarget !$= "" && %t.getId() == $Opt::AutoTarget && OptDist2D(MainCharacter.getPosition(), %t.getPosition()) > %reach) { OptAutoAttackLetGo(); }
+         if ($Opt::AutoTarget $= "" || %t.getId() != $Opt::AutoTarget) { return; }
+         %d = OptDist2D(%p, %t.getPosition());
+         if (%keys || (%mv > 0.3 && %d >= $Opt::RunTD - 0.05)) { OptAutoAttackLetGo("you are moving"); return; }
+         if (%d > %reach) { OptAutoAttackLetGo("out of reach"); return; }
+         $Opt::RunTD = %d;
          return;
       }
+      if (%keys || %mv > 0.3) { return; }
       %on = OptEnemyOnLord(%reach);
-      if (isObject(%on)) { OptAutoAttackSet(%on); }
+      if (isObject(%on))
+      {
+         OptAutoAttackSet(%on);
+         $Opt::RunTD = OptDist2D(%p, %on.getPosition());
+      }
       return;
    }
+   $Opt::RunPos = "";
    // stuck on a tree or fence on the way to the target: a step aside first (OptUnstick)
    if (OptUnstick(%t)) { return; }
-   if (isObject(%t) && %t.getState() !$= "Dead") { return; }
+   // FAR TARGET LET GO (the player: "auto-attack gets glued to an enemy ... the enemy is miles
+   // away yet it's still automatically running to him"): the enemy auto-attack picked is let go
+   // once it is more than $Opt::AutoFar m away
+   if (isObject(%t) && %t.getState() !$= "Dead" && $Opt::AutoTarget !$= "" && %t.getId() == $Opt::AutoTarget && OptDist2D(MainCharacter.getPosition(), %t.getPosition()) > $Opt::AutoFar)
+   {
+      OptAutoAttackDrop("more than " @ $Opt::AutoFar @ " m away");
+      return;
+   }
+   if (isObject(%t) && %t.getState() !$= "Dead") { OptAutoAttackBetter(%t, 0); return; }
    %on = OptEnemyOnLord(20);
    if (isObject(%on)) { OptAutoAttackSet(%on); return; }
    if (MainCharacter.inCombat()) { return; }
@@ -643,6 +819,7 @@ function OptAutoAttack()
    %dx = getWord(%p, 0) - getWord(%ep, 0);
    %dy = getWord(%p, 1) - getWord(%ep, 1);
    if (%dx < 0 || %dx > 64 || %dy < 0 || %dy > 64) { return; }
+   if (OptDist2D(%p, %c.getPosition()) > $Opt::AutoFar) { return; }
    OptAutoAttackSet(%c);
 }
 
@@ -699,10 +876,19 @@ function OptUnstick(%t)
    return 1;
 }
 
+// how far an enemy auto-attack follows (m): beyond it the target is let go (OptAutoAttack)
+$Opt::AutoFar = 30;
+
 function OptAutoAttackSet(%c)
 {
    MainCharacter.setAttackTarget(%c);
    $Opt::AutoTarget = %c.getId();
+   // every new pick goes to console.log, so a chase that looks wrong can be read back
+   if ($Opt::AutoLogged !$= %c.getId())
+   {
+      $Opt::AutoLogged = %c.getId();
+      echo("Opt auto-attack: on " @ OptCName(%c) @ " (" @ getWord("mage archer melee", OptFoeRank(%c)) @ "), " @ mRound(OptDist2D(MainCharacter.getPosition(), %c.getPosition())) @ " m away");
+   }
 }
 
 // how far your lord strikes from where he stands: the game's $MeleeWeaponMaxRange (3 m), or
@@ -716,46 +902,53 @@ function OptLordReach()
    return %r + 1;
 }
 
-// lets go of the target auto-attack set, without stopping you: you keep running
-function OptAutoAttackLetGo()
+// lets go of the target auto-attack set, without stopping you: you keep running. %why for the log
+function OptAutoAttackLetGo(%why)
 {
    if ($Opt::AutoTarget $= "") { return; }
    %id = $Opt::AutoTarget;
    $Opt::AutoTarget = "";
+   $Opt::AutoLogged = "";
    %t = MainCharacter.getAttackTarget();
    if (!isObject(%t) || %t.getId() != %id) { return; }
+   echo("Opt auto-attack: let go of " @ OptCName(%t) @ " (" @ %why @ ")");
    MainCharacter.stopAttacking();
    MainCharacter.setAttackTarget(0);
 }
 
-// lets go of the target auto-attack set, only if your lord still has that one
-function OptAutoAttackDrop()
+// lets go of the target auto-attack set, only if your lord still has that one. %why for the log
+function OptAutoAttackDrop(%why)
 {
    $Opt::UnstickTicks = 0;
    if ($Opt::AutoTarget $= "") { return; }
    %id = $Opt::AutoTarget;
    $Opt::AutoTarget = "";
+   $Opt::AutoLogged = "";
    if (!isObject(MainCharacter)) { return; }
    %t = MainCharacter.getAttackTarget();
    if (!isObject(%t) || %t.getId() != %id) { return; }
+   echo("Opt auto-attack: let go of " @ OptCName(%t) @ (%why !$= "" ? " (" @ %why @ ")" : ""));
    MainCharacter.stopAttacking();
    MainCharacter.setAttackTarget(0);
    MainCharacter.stop();
 }
 
-// the nearest living raider inside the town, or 0
+// the living raider at the town (within 120 m of its centre), or 0: ranged first (OptFoeRank),
+// the nearest within the same kind
 function OptRaiderInTown()
 {
    if (!isObject(gTown)) { return 0; }
    %lp = MainCharacter.getPosition();
    %best = 0;
    %bd = 999999;
+   %br = 3;
    // the game's own nearby search around the town (see OptEnemyOnLord): never every enemy on
    // the map every 150 ms. 250 m reaches past the town's edge on every side
    // the raiders are gathered first and the town test comes after the search, so nothing
    // inside the search loop can start another search
    %n = 0;
-   initContainerRadiusSearch(gTown.getTownCenter(), 250, $TypeMasks::PlayerObjectType);
+   %town = gTown.getTownCenter();
+   initContainerRadiusSearch(%town, 250, $TypeMasks::PlayerObjectType);
    while ((%c = containerSearchNext()) != 0)
    {
       if (%c.Role !$= "Enemy" || %c.getState() $= "Dead") { continue; }
@@ -767,20 +960,28 @@ function OptRaiderInTown()
       %c = %found[%j];
       if (!OptIsRaider(%c)) { continue; }
       %cp = %c.getPosition();
-      if (!gTown.Contains(%cp)) { continue; }
+      // AT THE TOWN AS THE GUIDE'S RAID STEP SAYS IT (the player: "auto-attack doesn't always work
+      // when raiders are in town, the hero doesn't attack them"; four Ogres raided with no pick
+      // at all): within 120 m of the town centre, where raiders stage, steal and attack
+      // (OptRaidThreat, "Defend the town: attack the raiders"). gTown.Contains ends well inside
+      // that, so raiders at the outer buildings were never picked
+      if (OptDist2D(%cp, %town) >= 120) { continue; }
       %d = OptDist2D(%lp, %cp);
-      if (%d < %bd) { %bd = %d; %best = %c; }
+      %k = OptFoeRank(%c);
+      if (%k < %br || (%k == %br && %d < %bd)) { %br = %k; %bd = %d; %best = %c; }
    }
    return %best;
 }
 
-// the nearest living enemy within %r metres whose attack target is your lord, or 0
+// the living enemy within %r metres whose attack target is your lord, or 0: ranged first (the
+// player's order: mages, then archers, then melee, OptFoeRank), the nearest within the same kind
 function OptEnemyOnLord(%r)
 {
    %me = MainCharacter.getId();
    %lp = MainCharacter.getPosition();
    %best = 0;
    %bd = 999999;
+   %br = 3;
    // THE GAME'S OWN NEARBY SEARCH (as CreatureData::yellForHelp does), not every enemy on the
    // map: this runs every 150 ms whenever you have no target, and a new map holds over 300
    // enemies. looping over all of them 7 times a second made the game stutter after every
@@ -792,9 +993,62 @@ function OptEnemyOnLord(%r)
       %t = %c.getAttackTarget();
       if (!isObject(%t) || %t.getId() != %me) { continue; }
       %d = OptDist2D(%lp, %c.getPosition());
-      if (%d <= %r && %d < %bd) { %bd = %d; %best = %c; }
+      if (%d > %r) { continue; }
+      %k = OptFoeRank(%c);
+      if (%k < %br || (%k == %br && %d < %bd)) { %br = %k; %bd = %d; %best = %c; }
    }
    return %best;
+}
+
+// RANGED FIRST (the player: "when a bunch of enemies are attacking us, we need to prioritize
+// ranged enemies first, because they deal the most dmg to us: mages/staves, archers, melee").
+// 0 = a mage, 1 = an archer, 2 = melee. read the way the game shows an enemy's attack
+// (Creature::getAttackIcon): the weapon it holds (slot 0), its AttackStatIcon magic (staffs,
+// wands) or missile (bows). an enemy with no weapon fights in melee.
+// A KIND THAT NEVER FLIPS: a dragon swaps its fang and its breath after most attacks
+// (DragonProc::onEndAttack, the other one kept in .alternateWeapon), so two dragons kept trading
+// places as "higher kind" and auto-attack switched between them every tick, ending each attack
+// before it landed. an enemy counts as the best of the weapon it holds and the one it swaps to
+function OptFoeRank(%c)
+{
+   %r = 2;
+   %w = %c.Inventory[0];
+   if (%w !$= "" && isObject(%w))
+   {
+      %db = %w.getDataBlock();
+      %r = OptIconRank(%db.AttackStatIcon);
+      // before its first swap a dragon has no .alternateWeapon yet: its fang means its breath
+      if (%db.getName() $= "dbItem_Dragon_Fang" && isObject(dbItem_Dragon_Breath)) { %r = OptMin(%r, OptIconRank(dbItem_Dragon_Breath.AttackStatIcon)); }
+   }
+   %alt = %c.alternateWeapon;
+   if (%alt !$= "" && isObject(%alt)) { %r = OptMin(%r, OptIconRank(%alt.getDataBlock().AttackStatIcon)); }
+   return %r;
+}
+
+// a weapon's attack icon as auto-attack's kind: 0 magic, 1 missile, 2 melee
+function OptIconRank(%ic)
+{
+   if (%ic $= $gStatIconMagic) { return 0; }
+   if (%ic $= $gStatIconMissile) { return 1; }
+   return 2;
+}
+
+// while your lord is on the target auto-attack picked, an enemy attacking you (within 20 m) of a
+// higher kind (OptFoeRank: a mage over an archer over melee) takes its place. a target you
+// clicked yourself is kept. %raid: only a raider may take its place (in town)
+function OptAutoAttackBetter(%t, %raid)
+{
+   if ($Opt::AutoTarget $= "" || %t.getId() != $Opt::AutoTarget) { return; }
+   %on = OptEnemyOnLord(20);
+   if (!isObject(%on) || %on.getId() == %t.getId()) { return; }
+   if (%raid && !OptIsRaider(%on)) { return; }
+   if (OptFoeRank(%on) >= OptFoeRank(%t)) { return; }
+   // the old attack is ended first: the game never changes a live attack target, it only sets
+   // one when there is none (CreatureData::onPartyMemberAttacked), as auto-attack does after a kill
+   echo("Opt auto-attack: switching from " @ OptCName(%t) @ " to a higher kind");
+   MainCharacter.stopAttacking();
+   MainCharacter.setAttackTarget(0);
+   OptAutoAttackSet(%on);
 }
 
 // hold the window to drag it; the text size bar rides along above it
@@ -804,17 +1058,46 @@ function OptOverlay::onMouseDown(%this, %mod, %pt, %clicks)
    $Opt::DragDX = getWord(%pt, 0) - getWord(%p, 0);
    $Opt::DragDY = getWord(%pt, 1) - getWord(%p, 1);
    $Opt::Dragging = 1;
+   $Opt::DragLast = getRealTime();
 }
 
 function OptOverlay::onMouseDragged(%this, %mod, %pt, %clicks)
 {
    if (!$Opt::Dragging) { return; }
+   $Opt::DragLast = getRealTime();
    OptMoveTo(getWord(%pt, 0) - $Opt::DragDX, getWord(%pt, 1) - $Opt::DragDY);
 }
 
 function OptOverlay::onMouseUp(%this, %mod, %pt, %clicks)
 {
    $Opt::Dragging = 0;
+}
+
+// ends a drag whose mouse-up never came: the window, its slider and its tick boxes are taken off
+// the screen and put back in the same order, which also makes the window give up the mouse
+function OptEndDrag()
+{
+   $Opt::Dragging = 0;
+   echo("Opt window: a drag was left on, ended");
+   if (!isObject(OptOverlay)) { return; }
+   %g = OptOverlay.getGroup();
+   if (!isObject(%g)) { return; }
+   %g.remove(OptOverlay);
+   %g.add(OptOverlay);
+   if (isObject(OptSliderBar)) { %g.remove(OptSliderBar); %g.add(OptSliderBar); }
+   if (isObject(OptTickBar)) { %g.remove(OptTickBar); %g.add(OptTickBar); }
+   if (isObject(OptPotionBar)) { %g.remove(OptPotionBar); %g.add(OptPotionBar); }
+}
+
+// F7: auto-attack on or off from the keyboard, the same as its tick box (works even when the
+// window can't be clicked); it also ends a drag left on
+function OptAutoKey()
+{
+   if ($Opt::Dragging) { OptEndDrag(); }
+   if (!isObject(OptAutoAttackBox)) { return; }
+   OptAutoAttackBox.setValue($pref::Opt::AutoAttack ? 0 : 1);
+   OptTicksChanged();
+   echo("Opt auto-attack: F7, now " @ ($pref::Opt::AutoAttack ? "on" : "off"));
 }
 
 function OptMoveTo(%x, %y)
@@ -824,7 +1107,7 @@ function OptMoveTo(%x, %y)
    %w = getWord(OptOverlay.getExtent(), 0);
    %h = getWord(OptOverlay.getExtent(), 1);
    %x = mClamp(%x, 0, %cw - %w);
-   %y = mClamp(%y, 58, %ch - 40);
+   %y = mClamp(%y, 58 + $Opt::PotionH, %ch - 40);
    $pref::Opt::Right = %cw - %x - %w;
    $pref::Opt::Y = %y;
    $pref::Opt::Placed = 1;
@@ -844,6 +1127,7 @@ function OptToggle()
       OptOverlay.setVisible($Opt::Visible);
       OptSliderBar.setVisible($Opt::Visible);
       OptTickBar.setVisible($Opt::Visible);
+      if (isObject(OptPotionBar)) { OptPotionBar.setVisible($Opt::Visible && $Opt::PotionN > 0); }
    }
    if (!$Opt::Visible) { OptJunkMarks(0); }
    if ($Opt::Visible)
@@ -852,13 +1136,14 @@ function OptToggle()
    }
 }
 
-// window width follows the text size; never narrower than the three tickboxes need (117 each),
-// since the tickbox bar and the text size bar take the same width (OptPlaceBars)
+// window width follows the text size; never narrower than the four tickboxes need (117 each,
+// 492 with the gaps; 372 for three before Auto Potion), since the tickbox bar and the text size
+// bar take the same width (OptPlaceBars)
 function OptWidth()
 {
    %f = $pref::Opt::Font;
    if (%f < 10) { %f = 18; }
-   return OptMax(mRound(29 * %f), 372);
+   return OptMax(mRound(29 * %f), 492);
 }
 
 // the tickbox bar and the text size bar sit straight above the guide window, with its left and
@@ -868,16 +1153,33 @@ function OptWidth()
 function OptPlaceBars(%x, %y, %w)
 {
    if (!isObject(OptSliderBar) || !isObject(OptTickBar)) { return; }
+   $Opt::BarX = %x;
+   $Opt::BarY = %y;
+   $Opt::BarW = %w;
    %key = %x SPC %y SPC %w;
    if (%key $= $Opt::BarRect) { return; }
    $Opt::BarRect = %key;
+   // the potion buttons above the tickboxes: two to a row, all the same size
+   $Opt::PotionH = 0;
+   if (isObject(OptPotionBar))
+   {
+      %pn = OptPotionBar.getCount();
+      %rows = mFloor((%pn + 1) / 2);
+      %ph = %rows * 24 + 4;
+      if (%pn > 0) { $Opt::PotionH = %ph; }
+      OptPotionBar.resize(%x, %y - 58 - %ph, %w, %ph);
+      %pw = mFloor((%w - 16) / 2);
+      for (%i = 0; %i < %pn; %i++) { OptPotionBar.getObject(%i).resize(6 + (%i % 2) * (%pw + 4), 4 + mFloor(%i / 2) * 24, %pw, 20); }
+      OptPotionBar.setVisible($Opt::Visible && %pn > 0);
+   }
    OptSliderBar.resize(%x, %y - 30, %w, 28);
    OptFontSlider.resize(%w - 168, 2, 160, 24);
    OptTickBar.resize(%x, %y - 58, %w, 28);
-   %bw = mFloor((%w - 20) / 3);
+   %bw = mFloor((%w - 24) / 4);
    OptAutoAttackBox.resize(6, 4, %bw, 20);
    OptWasdBox.resize(10 + %bw, 4, %bw, 20);
    OptZoomBox.resize(14 + 2 * %bw, 4, %bw, 20);
+   if (isObject(OptPotionBox)) { OptPotionBox.resize(18 + 3 * %bw, 4, %bw, 20); }
 }
 
 // called by the slider while it is dragged
@@ -927,6 +1229,7 @@ function OptAttach(%gui)
       %gui.add(OptOverlay);
       %gui.add(OptSliderBar);
       %gui.add(OptTickBar);
+      %gui.add(OptPotionBar);
    }
    %cw = getWord(Canvas.getExtent(), 0);
    if ($pref::Opt::Placed)
@@ -954,6 +1257,7 @@ function OptAttach(%gui)
    OptOverlay.setVisible($Opt::Visible);
    OptSliderBar.setVisible($Opt::Visible);
    OptTickBar.setVisible($Opt::Visible);
+   OptPotionBar.setVisible($Opt::Visible && $Opt::PotionN > 0);
 }
 
 function OptTick()
@@ -1151,14 +1455,36 @@ function OptPipeGear()
 // (OptPipeShow), one fight or two per piece, at most $Opt::KeepPerPass fights per pass, and the
 // next pass takes over from it, so the guide never waits for it (the first full check takes a
 // few passes)
-$Opt::KeepPerPass = 60;
+// 120 (was 60), doubled with $Opt::SliceBudget: the same share of each pass, twice the fights
+$Opt::KeepPerPass = 120;
 
-// the every-enemy totals first (they decide the equip step), then the keep check
+// the every-enemy totals (they decide the equip step), then the keep check.
+// JUNK ITEM BY ITEM (the player: "my town inventory is full of gear, but the mod never tells me to
+// sell it"; after a weapon change the totals took 127 s of play, and the keep check only began
+// after all of them, so nothing was junk for minutes). while the totals have work left, the two
+// take turns piece by piece whenever the keep check's next item already has its own total
+// (OptKeepReady): each item gets both answers one after the other and can be junk at once
 function OptPipeKeep()
 {
    %t0 = getRealTime();
+   if ($OptWGGen !$= "" && OptWGPending())
+   {
+      $OptKeepTurn = !$OptKeepTurn;
+      if ($OptKeepTurn && OptKeepReady()) { OptKeepStep(%t0); return; }
+      OptWGStep(%t0);
+      return;
+   }
    if (!OptWGStep(%t0)) { return; }
    if (OptKeepStep(%t0)) { $Opt::Busy = 0; }
+}
+
+// 1 when the keep check has a fight to do this pass on an item whose every-enemy total is done
+function OptKeepReady()
+{
+   if ($OptKeepFights >= $Opt::KeepPerPass) { return 0; }
+   while ($OptKeepII < $OptKeepIN && !isObject($OptKeepItem[$OptKeepII])) { $OptKeepII++; }
+   if ($OptKeepII >= $OptKeepIN) { return 0; }
+   return OptWGItemSum($OptKeepItem[$OptKeepII].getId()) !$= "";
 }
 
 // starts this pass's share of the keep check: a new list of fights when anything it depends on
@@ -1608,6 +1934,25 @@ function OptWGProgress()
    return mFloor(100 * %done / ($OptWGN * $OptWGFN)) @ "%";
 }
 
+// 1 while the totals have work left: the list of enemies still being made, or an item (one just
+// picked up) not yet fought against all of it
+function OptWGPending()
+{
+   if ($OptWGPhase < 2) { return 1; }
+   for (%n = 0; %n < $OptWGN; %n++) { if ($OptWGUpTo[$OptWGKey[%n]] < $OptWGFN) { return 1; } }
+   return 0;
+}
+
+// one item's every-enemy total once it is done for what you wear now (the list of enemies whole
+// and the item fought against all of it), else "": junk is judged item by item, without waiting
+// for every other item (OptJunkAll)
+function OptWGItemSum(%id)
+{
+   if ($OptWGPhase < 2 || $OptWGFN < 1 || $OptWGGenOf[%id] != $OptWGGen || $OptWGUpTo[%id] < $OptWGFN) { return ""; }
+   if ($OptWGSet !$= OptWGSetSig()) { return ""; }
+   return $OptWGSum[%id];
+}
+
 // every item has its total: these are the numbers the guide uses from now on
 function OptWGPublish()
 {
@@ -1751,6 +2096,8 @@ function OptKeepWork(%t0)
       %it = $OptKeepItem[$OptKeepII];
       if (!isObject(%it)) { $OptKeepII++; continue; }
       %id = %it.getId();
+      // while the every-enemy totals are being added up, an item waits for its own (OptPipeKeep)
+      if ($OptWGGen !$= "" && OptWGPending() && OptWGItemSum(%id) $= "") { return 0; }
       %slot = $OptKeepSlot[$OptKeepII];
       %idb = %it.getDataBlock();
       while ($OptKeepUpTo[%id] < $OptKeepBN)
@@ -2050,6 +2397,129 @@ function OptShow(%target, %title, %info, %body)
 
 // redraws the arrow, the distance in the step line and the "Then:" distance from the
 // last plan, without replanning
+// AUTO POTION (tickbox; the player: "a tick box Auto Potion which auto health potions whenever
+// less than 50% HP"). every fast tick (150 ms, none while paused): your lord under half his max
+// HP, alive, a Healing Potion in your bag -> one is drunk with the game's own key-1 call
+// (UseHealingPotion: the first Healing Potion in the bag, +a third of max HP). never in town (the
+// player's rule: "from the moment I enter town, drink a potion should NEVER appear", OptPotionTown:
+// resting there heals for free). 1 s between two, so a heal lands before the next look
+function OptAutoPotion()
+{
+   if (!isObject(MainCharacter) || MainCharacter.getState() $= "Dead") { return; }
+   if ($Opt::PotionLast !$= "" && getRealTime() - $Opt::PotionLast < 1000) { return; }
+   %mhp = MainCharacter.getMaxHealth();
+   %hp = MainCharacter.GetCurrentHealth();
+   if (%mhp <= 0 || %hp >= %mhp * 0.5 || OptPotionTown() || OptPotions() < 1) { return; }
+   %party = MainCharacter.getParty();
+   if (!isObject(%party)) { return; }
+   %me = MainCharacter.getId();
+   for (%i = 0; %i < %party.getPartySize(); %i++)
+   {
+      %m = %party.getMember(%i);
+      if (!isObject(%m) || %m.getId() != %me) { continue; }
+      $Opt::PotionLast = getRealTime();
+      UseHealingPotion(%i);
+      echo("Opt auto-potion: HP " @ mFloor(%hp) @ "/" @ %mhp @ ", drank one, HP now " @ mFloor(MainCharacter.GetCurrentHealth()) @ ", " @ OptPotions() @ " left");
+      OptRefreshNow();
+      return;
+   }
+}
+
+// POTIONS BY A CLICK (the player: "let's make it possible for potions that require being dropped
+// in the portrait to work by double-clicking on them, dropping them in the portrait doesn't
+// always work"; the game's inventory slots report no clicks to scripts, only drags, so he chose
+// "click them in the window"). a bar above the tickboxes: one button per kind of such potion in
+// your bag (Regeneration, Harden, Berserker, the bloods ...), with how many you have. not the
+// Healing Potion (keys 1-4, Auto Potion) nor the Magic Pumpkin (only a Farmer can use it).
+// rebuilt only when what is in the bag changed; hidden when there are none
+function OptPotionBarUpdate()
+{
+   if (!isObject(OptPotionBar) || !isObject(MainCharacter)) { return; }
+   %party = MainCharacter.getParty();
+   if (!isObject(%party)) { return; }
+   %inv = %party.GetInventory();
+   if (!isObject(%inv)) { return; }
+   %n = 0;
+   %slots = %inv.GetNumSlots();
+   for (%k = 0; %k < %slots; %k++)
+   {
+      %it = %inv.GetItem(%k);
+      if (!isObject(%it)) { continue; }
+      %idb = %it.getDataBlock();
+      if (!%idb.Useable || %idb.category !$= "Potion" || %idb.Name $= "Healing_Potion" || %idb.Name $= "Magic_Pumpkin") { continue; }
+      %nm = %idb.getName();
+      %amt = %inv.GetItemAmount(%k);
+      if (%amt < 1) { %amt = 1; }
+      %at = -1;
+      for (%j = 0; %j < %n && %at < 0; %j++) { if (%kind[%j] $= %nm) { %at = %j; } }
+      if (%at < 0)
+      {
+         %at = %n;
+         %kind[%n] = %nm;
+         %label[%n] = %it.getNameString();
+         %cnt[%n] = 0;
+         %n++;
+      }
+      %cnt[%at] += %amt;
+   }
+   %sig = "";
+   for (%j = 0; %j < %n; %j++) { %sig = %sig @ %kind[%j] @ ":" @ %cnt[%j] @ " "; }
+   if (%sig $= $Opt::PotionSig) { return; }
+   $Opt::PotionSig = %sig;
+   for (%i = OptPotionBar.getCount() - 1; %i >= 0; %i--) { OptPotionBar.getObject(%i).delete(); }
+   for (%j = 0; %j < %n; %j++)
+   {
+      %b = new GuiButtonCtrl()
+      {
+         Profile = "OptButtonProfile";
+         HorizSizing = "right";
+         VertSizing = "bottom";
+         position = "6 4";
+         Extent = "117 20";
+         text = %label[%j] @ (%cnt[%j] > 1 ? " x" @ %cnt[%j] : "");
+         Command = "OptUsePotionKind(" @ %kind[%j] @ ");";
+      };
+      OptPotionBar.add(%b);
+   }
+   $Opt::PotionN = %n;
+   // placed again at once: the bar's height follows its rows
+   $Opt::BarRect = "";
+   if ($Opt::BarW !$= "") { OptPlaceBars($Opt::BarX, $Opt::BarY, $Opt::BarW); }
+}
+
+// a potion button was clicked: one of that kind from your bag is used on your lord the way the
+// game does when it is dropped on the portrait (Creature::UseItem), then taken from the bag as
+// UseHealingPotion takes a Healing Potion. an effect already running is not stacked by the game
+// (AddSpellEffectProc returns 0), and its chance roll (100 + the item's level - your level,
+// 2 to 95 %) can fail: then the potion stays in the bag. a blood's permanent stats
+// (PermanentBuffProc) are added though its call returns nothing: it is taken. the buttons are
+// rebuilt by the next fast tick, never inside this click
+function OptUsePotionKind(%name)
+{
+   if (!isObject(MainCharacter) || MainCharacter.getState() $= "Dead") { return; }
+   %inv = MainCharacter.getParty().GetInventory();
+   %slots = %inv.GetNumSlots();
+   for (%k = 0; %k < %slots; %k++)
+   {
+      %it = %inv.GetItem(%k);
+      if (!isObject(%it) || %it.getDataBlock().getName() !$= %name) { continue; }
+      %idb = %it.getDataBlock();
+      %label = %it.getNameString();
+      %used = MainCharacter.UseItem(%it);
+      %perm = %idb.hitProc !$= "" && isObject(%idb.hitProc) && %idb.hitProc.class $= "PermanentBuffProc";
+      if (%used || %perm)
+      {
+         %inv.RemoveItem(%k, 1);
+         %inv.UpdateIcon(%k);
+         sfxPlayOnce(ui_potion_down);
+         echo("Opt potion: used " @ %label @ " on your lord");
+      }
+      else { echo("Opt potion: " @ %label @ " did nothing (the game's own chance roll failed, or its effect is already on you), kept"); }
+      $Opt::PotionSig = "";
+      return;
+   }
+}
+
 function OptFastTick()
 {
    cancel($Opt::FastSchedule);
@@ -2058,6 +2528,21 @@ function OptFastTick()
    %rt = getRealTime();
    if ($Opt::PlayLast !$= "" && $timeScale != 0) { $Opt::PlayMs += mClamp(%rt - $Opt::PlayLast, 0, 1000); }
    $Opt::PlayLast = %rt;
+   // A DRAG LEFT ON (the player: "the mod cannot be interacted anymore, I can't tick or untick the
+   // boxes ... my hero is chasing an enemy miles away"). a mouse button let go outside the game
+   // (alt-tab) never reaches the window: $Opt::Dragging stayed on, the window kept the mouse (no
+   // box could be clicked) and this tick returned here before auto-attack, so nothing let go of
+   // the chase. a drag with no movement for 2 s ends now, and the window lets go of the mouse
+   // (taken off the screen and put back: a control that sleeps gives up the mouse)
+   if ($Opt::Dragging && %rt - $Opt::DragLast > 2000) { OptEndDrag(); }
+   // auto-attack is looked after whatever the window does (hidden with F8, being dragged)
+   if (isObject(PlayGui) && isObject(Canvas) && Canvas.getContent() == PlayGui.getId() && isObject(MainCharacter))
+   {
+      %ta = getRealTime();
+      if ($pref::Opt::AutoAttack) { OptAutoAttack(); } else { OptAutoAttackDrop(); }
+      if ($pref::Opt::AutoPotion) { OptAutoPotion(); }
+      OptPerfNote(getRealTime() - %ta, 0, "tick");
+   }
    if (!$Opt::Visible || $Opt::Dragging || !isObject(OptOverlay) || !isObject(Canvas)) { return; }
    // the new game screen: each setting's ok / change follows your click at once, not at the
    // next 2 s refresh. redrawn only when the text changed
@@ -2076,6 +2561,7 @@ function OptFastTick()
    }
    if (!isObject(PlayGui)) { return; }
    if (Canvas.getContent() != PlayGui.getId() || !isObject(MainCharacter) || $OptLastBody $= "") { return; }
+   OptPotionBarUpdate();
    OptJunkBlink();
    // the potions in your bag changed any other way (one dragged onto a portrait, one picked up):
    // answered at once too
@@ -2085,9 +2571,6 @@ function OptFastTick()
       $Opt::PotSeen = %pn;
       OptRefreshNow();
    }
-   %ta = getRealTime();
-   if ($pref::Opt::AutoAttack) { OptAutoAttack(); } else { OptAutoAttackDrop(); }
-   OptPerfNote(getRealTime() - %ta, 0, "tick");
    if ($OptLastTarget $= "" && $OptThenPos $= "" && strstr($OptLastBody, "@FLASH@") < 0) { return; }
    %t0 = getRealTime();
    OptShow($OptLastTarget, $OptLastTitle, $OptLastInfo, $OptLastBody);
@@ -4300,19 +4783,43 @@ function OptHasFoodWorker()
    return 0;
 }
 
-// a visitor the guide hires for food: ANY FOOD WORKER, the best kind first (the player's rule,
-// in place of "Farmers only": waiting for a Farmer at the start of a game left the town empty
-// for a long time). the kinds rank by the most food their building reaches (OptFoodRank):
-// Farmer (Grain Farm 1.5 > Large Farm 3 > Plantation 5 a day) > Trapper (Camp 1.5 > Hunting
-// Lodge 3) > Herder (Cattle Farm 1.5, Dragon Ranch 1.5). the plan keeps $Opt::Farmers (6) food
-// workers and trades the weakest kind for a better one that visits (OptSwapPick: "4 farmers, 2
-// herders, a trapper appears: one herder out, the trapper in"), until all 6 are Farmers on 6
-// Plantations
+// a visitor the guide hires for food: FARMERS ONLY (the player's rule, back again: "let's remove
+// herders and trappers. farmers only"; any food worker had been tried to fill the town sooner).
+// a Farmer's building grows (Grain Farm 1.5 > Large Farm 3 > Plantation 5 a day); a Herder's
+// stays 1.5 and a Trapper's reaches 3. Herders and Trappers already in town count as food workers
+// until a visiting Farmer takes their place (OptSwapPick). to find Farmers sooner, the Goodman's
+// visitor slots come first while Farmers are short (OptIsSlotsHire)
 function OptMakesFood(%c)
 {
    %cd = %c.myCandidateData;
    if (!isObject(%cd)) { return 0; }
+   if (%cd.Profession !$= "Farmer" && %cd.Profession !$= "OrcFarmer") { return 0; }
    return OptFoodRank(%cd.Profession) > 0;
+}
+
+// THE GOODMAN FOR MORE VISITORS (the player: "in early game only 2 townsfolk appear each time, so
+// it's very hard to find farmers"). the visitors at a time are the Candidate_Bonus of the occupied
+// buildings (PlayerTown::getNumHireableCandidates): your house 2 at every level, the Goodman's
+// Hostel +1, Inn +2, Tavern +3. while fewer than 6 Farmers live in town his line comes first:
+// hired before the first Farmer too, as long as the food in store feeds him (OptGoodmanFoodOk),
+// and its upgrades are bought for the visitors even when their gold pays back slowly.
+// 1 for a Goodman visitor to hire that way
+function OptIsSlotsHire(%c)
+{
+   if (!OptFarmersShort() || !isObject(%c.myCandidateData)) { return 0; }
+   %gl = OptLineIndex("gold");
+   if (%gl < 0 || %c.myCandidateData.Profession !$= getWord($OptLine[%gl], 1)) { return 0; }
+   OptTownScan();
+   if (isObject($OptLW[%gl])) { return 0; }
+   return OptGoodmanFoodOk();
+}
+
+// 1 when the food in store lasts 10 shown days or more with one more mouth
+function OptGoodmanFoodOk()
+{
+   %net = OptFoodNet() - 1;
+   if (%net >= 0) { return 1; }
+   return gTown.Food / (-%net) >= 10;
 }
 
 // the most food a building reaches along its upgrades (Food_Produced a game day), 0 for none
@@ -4480,26 +4987,6 @@ function OptFoodUpgrade(%bdb)
    return %up;
 }
 
-// 1 when the bows line should build its Fletchery for a Trapper: a Camp worker lives in town
-// (dbBuildingHunting_Lodge needs a Manor, a Fletchery and Game access), fewer than 6 Farmers live
-// there (with 6 the Trappers are traded away, OptSwapPick), the town has Game access, and no
-// Fletchery stands yet
-function OptFletcheryForLodge()
-{
-   if (!OptFarmersShort() || gTown.HasBuilding(dbBuildingFletchery)) { return 0; }
-   if (!isObject(dbResourceGame) || !gTown.getResourceAccess(dbResourceGame.Name)) { return 0; }
-   for (%i = 0; %i < TownsPeople.getCount(); %i++)
-   {
-      %p = TownsPeople.getObject(%i);
-      if (!isObject(%p) || %p.getState() $= "Dead") { continue; }
-      %b = %p.getHomeBuilding();
-      if (!isObject(%b)) { continue; }
-      %up = %b.getDataBlock().Upgrades_To_1;
-      if (isObject(%up) && %up.getName() $= "dbBuildingHunting_Lodge") { return 1; }
-   }
-   return 0;
-}
-
 // a townsperson whose farm can still be upgraded for food: the first one, or 0
 function OptFarmToUpgrade()
 {
@@ -4593,7 +5080,12 @@ function OptFoodRoute(%margin)
    if (%margin $= "") { %margin = 0; }
    %town = gTown.getTownCenter();
    %there = OptLordInTown();
-   %p = OptFarmToUpgrade();
+   // FARM UPGRADES ONLY WHEN THE FOOD NEEDS THEM (the player: "why spend so much money on
+   // upgrading farms to large farms and plantations ... I'm holding 381 food, producing 22.5 a day
+   // while consuming 8"; the upgrades took the gold the Market route needed): a farm is upgraded
+   // only while the town makes less than %margin food a day spare right now (OptFoodNet), so the
+   // upgrades come as the town grows and eats more
+   %p = (OptFoodNet() < %margin) ? OptFarmToUpgrade() : 0;
    if (isObject(%p))
    {
       %b = %p.getHomeBuilding();
@@ -4899,14 +5391,34 @@ function OptOwnedScan()
 }
 
 // pipeline stage: the best gear change each production set could give (cached 30 s)
+// RESEARCH TOO (the player: "you never considered craftsmen to research items, doesn't that
+// increase chances of making better items?" then "yes, add them"). a building with a research
+// set learns one random item of it per research and can make it from then on
+// (completeItemResearch moves it from RS_x to PS_x). each gear production set's research set
+// (RS_ for PS_, where the game has one: the Armory, the Weaponsmith, the Tower, the Hut) is
+// scored the same way: the best gear change among the items still to learn
+function OptPSAllSets()
+{
+   %all = "";
+   for (%w = 0; %w < getWordCount($Opt::PSSets); %w++)
+   {
+      %set = getWord($Opt::PSSets, %w);
+      %all = %all @ %set @ " ";
+      %rs = "RS" @ getSubStr(%set, 2, 999);
+      if (isObject(%rs) && isFunction("isItemResearchSet") && isItemResearchSet(%rs)) { %all = %all @ %rs @ " "; }
+   }
+   return trim(%all);
+}
+
 function OptPSBegin()
 {
    OptOwnedScan();
    $OptPSn = 0;
    $OptPSI = 0;
-   for (%w = 0; %w < getWordCount($Opt::PSSets); %w++)
+   $OptPSAll = OptPSAllSets();
+   for (%w = 0; %w < getWordCount($OptPSAll); %w++)
    {
-      %set = getWord($Opt::PSSets, %w);
+      %set = getWord($OptPSAll, %w);
       $OptPSGainNew[%set] = 0;
       $OptPSBestNew[%set] = "";
       if (!isObject(%set)) { continue; }
@@ -4934,9 +5446,9 @@ function OptPSStep(%t0)
       %set = $OptPSSet[%i];
       if (%d !$= "" && %d < $OptPSGainNew[%set]) { $OptPSGainNew[%set] = %d; $OptPSBestNew[%set] = %db.getNameString(); }
    }
-   for (%w = 0; %w < getWordCount($Opt::PSSets); %w++)
+   for (%w = 0; %w < getWordCount($OptPSAll); %w++)
    {
-      %set = getWord($Opt::PSSets, %w);
+      %set = getWord($OptPSAll, %w);
       $OptPSGain[%set] = $OptPSGainNew[%set];
       $OptPSBest[%set] = $OptPSBestNew[%set];
    }
@@ -4952,7 +5464,11 @@ function OptLineGearGain(%l, %s)
    %n = getWordCount($OptLine[%l]) - 2;
    for (%k = %s; %k < %n; %k++)
    {
-      %set = getWord($OptLine[%l], %k + 2).Production_Set;
+      %bdb = getWord($OptLine[%l], %k + 2);
+      // what its research can still teach it counts too (OptPSAllSets)
+      %rs = %bdb.Research_Set;
+      if (%rs !$= "" && $OptPSGain[%rs] !$= "" && strstr(" " @ $OptPSAll @ " ", " " @ %rs @ " ") >= 0 && $OptPSGain[%rs] < %best) { %best = $OptPSGain[%rs]; %name = $OptPSBest[%rs] @ " (by research)"; }
+      %set = %bdb.Production_Set;
       if (%set $= "" || $OptPSGain[%set] $= "") { continue; }
       if ($OptPSGain[%set] < %best) { %best = $OptPSGain[%set]; %name = $OptPSBest[%set]; }
    }
@@ -5149,7 +5665,10 @@ function OptLineWorth(%l, %s, %pb)
          %mw = strreplace(OptMarketWorth(), "|", "\t");
          return "1|" @ (%dg + getField(%mw, 0)) @ "|unlocks the Market and its Merchant (" @ getField(%mw, 1) @ ") · 2 visitor slots";
       }
-      return (%dg > 0) @ "|" @ %dg @ "|+" @ OptNum(%dg) @ " gold a day";
+      // the visitors at a time it adds (Candidate_Bonus): worth it for them while Farmers are short
+      %vb = %bdb.Candidate_Bonus - (isObject(%prev) ? %prev.Candidate_Bonus : 0);
+      %vt = (%vb > 0) ? " · +" @ %vb @ " visitor" @ (%vb == 1 ? "" : "s") @ " at a time" : "";
+      return (%dg > 0 || (%vb > 0 && OptFarmersShort())) @ "|" @ %dg @ "|+" @ OptNum(%dg) @ " gold a day" @ %vt;
    }
    if (%key $= "potions")
    {
@@ -5171,14 +5690,8 @@ function OptLineWorth(%l, %s, %pb)
    }
    if (%key $= "bows")
    {
-      // A TRAPPER'S HUNTING LODGE (the player's rule: "only if trappers are in town", and not once
-      // the 6 Farmers are there): the Fletchery is also what lets a Camp become a Hunting Lodge
-      if (OptFletcheryForLodge())
-      {
-         %n = getWordCount($OptLine[%l]) - 2;
-         return "1|" @ %dg @ "|" @ (%s < %n - 1 ? "first step to the Fletchery, which " : "the Fletchery ") @ "lets your Trapper's Camp become a Hunting Lodge (3 food a day instead of 1.5)";
-      }
-      // otherwise worth only when the Fletchery's bows beat the best bow you own
+      // worth only when the Fletchery's bows beat the best bow you own (a Trapper's Hunting Lodge
+      // no longer counts: Farmers only, #162)
       if (!OptNeed($Achievement_David)) { return "0|0|"; }
       %have = getWord(OptBestBow(), 0) + 0;
       %n = getWordCount($OptLine[%l]) - 2;
@@ -5213,7 +5726,7 @@ function OptLineAction(%l)
    %key = getWord($OptLine[%l], 0);
    %stage = isObject($OptLW[%l]) ? $OptLStage[%l] + 1 : 0;
    %goldStep = (%key $= "gold" || %key $= "market" || (%key $= "fortune" && %stage == 0));
-   if (%goldStep && getField(%f, 5) > $Opt::WorthPayback) { return "none"; }
+   if (%goldStep && getField(%f, 5) > $Opt::WorthPayback && !(%key $= "gold" && OptFarmersShort())) { return "none"; }
    return %a;
 }
 
@@ -5271,7 +5784,7 @@ function OptLineActionRaw(%l)
       return "wait|0|Hire a " @ %prof @ " after: " @ %first @ "|" @ getField(%v, 2) @ "||9999";
    }
    // the first hire is a food worker
-   if (!OptHasFoodWorker()) { return "wait|0|Hire a " @ %prof @ " after your first food worker|" @ getField(%v, 2) @ "||9999"; }
+   if (!OptHasFoodWorker() && !(getWord($OptLine[%l], 0) $= "gold" && OptFarmersShort() && OptGoodmanFoodOk())) { return "wait|0|Hire a " @ %prof @ " after your first Farmer|" @ getField(%v, 2) @ "||9999"; }
    // every building lot taken: nobody who needs a new building
    if (OptNeedsLot(%prof) && OptFreeLots() < 1) { return "wait|0|Hire a " @ %prof @ " when a building lot is free (all " @ gTown.numValidLots @ " are taken)|" @ getField(%v, 2) @ "||9999"; }
    %c = OptVisitorOf(%prof);
@@ -5299,7 +5812,7 @@ function OptTownPick()
       %f = strreplace(%a, "|", "\t");
       %kind = getField(%f, 0);
       if (%kind $= "none" || %kind $= "wait") { continue; }
-      if (%kind $= "hire" && !%foodOk) { continue; }
+      if (%kind $= "hire" && !%foodOk && !(getWord($OptLine[%l], 0) $= "gold" && OptFarmersShort() && OptGoodmanFoodOk())) { continue; }
       %p = getField(%f, 5);
       if (%p <= %bestP && getField(%f, 1) <= %gold) { %best = %a; %bestP = %p; }
    }
@@ -5313,7 +5826,7 @@ function OptTownPick()
       %f = strreplace(%a, "|", "\t");
       %kind = getField(%f, 0);
       if (%kind $= "none" || %kind $= "wait") { continue; }
-      if (%kind $= "hire" && !%foodOk) { continue; }
+      if (%kind $= "hire" && !%foodOk && !(getWord($OptLine[%l], 0) $= "gold" && OptFarmersShort() && OptGoodmanFoodOk())) { continue; }
       %keep = OptLineIsMarketRoute(%l) ? 0 : $OptTownReserve;
       // what the town line and the lord's panel show as kept back
       $OptTownPickKeep = %keep;
@@ -5564,7 +6077,38 @@ function OptTownChores()
       if (!isObject(%b)) { continue; }
       %bdb = %b.getDataBlock();
       %set = %bdb.Production_Set;
-      if (%set $= "" || %b.occupantActionType $= "Researching") { continue; }
+      if (%set $= "") { continue; }
+      // RESEARCH WHEN SOMETHING STILL TO LEARN BEATS ALL IT MAKES (OptPSAllSets): the best gear
+      // change among the items its research set still holds, at least 0.5 better than the best
+      // it can make now. it learns one random item of them per research, so it keeps researching
+      // while that is so; then it is set back to make items (the make / sell rules below)
+      %rs = %bdb.Research_Set;
+      %hasRS = %rs !$= "" && isObject(%rs) && strstr(" " @ $OptPSAll @ " ", " " @ %rs @ " ") >= 0;
+      if (%hasRS && $OptPSGain[%rs] $= "") { continue; }
+      %pg = ($OptPSGain[%set] $= "") ? 0 : $OptPSGain[%set];
+      %research = %hasRS && %b.canResearch() && $OptPSGain[%rs] <= -0.5 && $OptPSGain[%rs] < %pg - 0.5;
+      if (%b.occupantActionType $= "Researching")
+      {
+         // the game itself researches when there is nothing to make yet (pickSomethingToDo)
+         if (%research || !%hasRS || !%b.canProduce()) { continue; }
+         OptNow("Set " @ %p.getNameString() @ " to make items", "click " @ OptHim(%p) @ " and press " @ getStringTableEntry($ID_TOWNS_PERSON_PRODUCE_ITEMS) @ " (it shows what " @ OptHe(%p) @ " does now) · nothing left to learn beats what " @ OptHe(%p) @ " can make", "");
+         return 1;
+      }
+      if (%research)
+      {
+         %rtxt = OptHis(%p) @ " " @ %b.getNameString() @ " can learn " @ $OptPSBest[%rs] @ " (" @ OptNum($OptPSGain[%rs]) @ " damage taken), better than anything " @ OptHe(%p) @ " makes now" @ (%pg <= -0.5 ? " (" @ $OptPSBest[%set] @ ", " @ OptNum(%pg) @ ")" : "") @ " · each research teaches one random item of the " @ %rs.getCount() @ " still to learn, and nothing is made meanwhile";
+         if (%b.occupantActionType $= "Selling")
+         {
+            OptNow("Set " @ %p.getNameString() @ " to make items", "click " @ OptHim(%p) @ " and press " @ getStringTableEntry($ID_TOWNS_PERSON_PRODUCE_GOODS) @ " (it shows what " @ OptHe(%p) @ " does now), then " @ getStringTableEntry($ID_TOWNS_PERSON_RESEARCH_ITEMS) @ " · " @ %rtxt, "");
+            return 1;
+         }
+         if (%b.occupantActionType $= "Producing")
+         {
+            OptNow("Set " @ %p.getNameString() @ " to research items", "click " @ OptHim(%p) @ " and press " @ getStringTableEntry($ID_TOWNS_PERSON_RESEARCH_ITEMS) @ " · " @ %rtxt, "");
+            return 1;
+         }
+         continue;
+      }
       %potion = strstr(" " @ $Opt::PotionSets @ " ", " " @ %set @ " ") >= 0;
       %gain = $OptPSGain[%set] !$= "" && $OptPSGain[%set] <= -0.5;
       %make = %potion || %gain;
@@ -5614,7 +6158,8 @@ function OptTownSells()
 // defense and HP. a visitor and a townsperson of the SAME profession whose home the visitor can
 // move into (its Occupant is that profession: the base building, the Large Farm, the
 // Plantation; never an Inn, Smithy or other upgrade, which no visitor fills), the visitor's
-// shown level higher. the visitor needs a day left and his fame met, and his hire price (the
+// shown level higher. the visitor is still in town (his last day too: the player had the gold
+// and was told "not affordable yet" on that day) with his fame met, and his hire price (the
 // building stays, so no building price) must fit in your gold above what the Market route
 // keeps. the townsperson must be at full HP (sending away an injured one costs fame,
 // Creature::evictFromTown) and not in your party. the biggest level gain wins.
@@ -5637,17 +6182,16 @@ function OptSwapPick()
    $OptSwapType = 0;
    if (!isObject(TownsPeople) || !isObject(gTown) || !isObject(MainCharacter)) { return 0; }
    %party = MainCharacter.getParty();
-   %gold = gTown.Gold - OptMarketReserve();
    if (!OptFoodShort() && OptFarmersShort())
    {
       %bestUp = 0;
       for (%i = 0; %i < $MaxNumberOfCandidates; %i++)
       {
          %c = gTown.AvailableCandidates[%i];
-         if (!isObject(%c) || !isObject(%c.myCandidateData) || gTown.CandidateTimeRemaining[%i] < 1) { continue; }
+         if (!isObject(%c) || !isObject(%c.myCandidateData) || gTown.CandidateTimeRemaining[%i] < 0) { continue; }
          if (gTown.Fame < %c.FameRequired) { continue; }
          %rc = OptFoodRank(%c.myCandidateData.Profession);
-         if (%rc <= 0) { continue; }
+         if (%rc <= 0 || !OptMakesFood(%c)) { continue; }
          // paid from all your gold: food comes before the Market route (as the food route's own
          // hires do); the Market reserve had kept a Farmer from replacing a Herder
          if (getField(strreplace(OptHireInfo(%c), "|", "\t"), 1) > gTown.Gold) { continue; }
@@ -5674,8 +6218,10 @@ function OptSwapPick()
    for (%i = 0; %i < $MaxNumberOfCandidates; %i++)
    {
       %c = gTown.AvailableCandidates[%i];
-      if (!isObject(%c) || !isObject(%c.myCandidateData) || gTown.CandidateTimeRemaining[%i] < 1) { continue; }
-      if (gTown.Fame < %c.FameRequired || %c.HireCost > %gold) { continue; }
+      if (!isObject(%c) || !isObject(%c.myCandidateData) || gTown.CandidateTimeRemaining[%i] < 0) { continue; }
+      // paid from all your gold (the player's rule): the Market route's reserve had kept a L2
+      // Farmer from replacing a L1 one with 17 gold in town and an 11 gold price
+      if (gTown.Fame < %c.FameRequired || %c.HireCost > gTown.Gold) { continue; }
       %prof = %c.myCandidateData.Profession;
       %cl = %c.getApparentLevel();
       for (%j = 0; %j < TownsPeople.getCount(); %j++)
@@ -5728,7 +6274,7 @@ function OptTradeUpFor(%c)
 {
    if (OptFoodShort() || !OptFarmersShort() || !isObject(%c.myCandidateData)) { return 0; }
    %rc = OptFoodRank(%c.myCandidateData.Profession);
-   if (%rc <= 0) { return 0; }
+   if (%rc <= 0 || !OptMakesFood(%c)) { return 0; }
    %party = MainCharacter.getParty();
    %best = 0;
    %bestUp = 0;
@@ -5741,6 +6287,35 @@ function OptTradeUpFor(%c)
       if (%rw <= 0 || %rc - %rw <= %bestUp + 0.01) { continue; }
       %bestUp = %rc - %rw;
       %best = %w;
+   }
+   return %best;
+}
+
+// the townsperson a visitor would replace in a level swap (OptSwapPick's rules) whether or not it
+// can happen now (gold, fame, the worker's HP): the lowest level one of his profession, or 0
+function OptLevelSwapFor(%c)
+{
+   if (!isObject(%c.myCandidateData)) { return 0; }
+   %prof = %c.myCandidateData.Profession;
+   if (!OptJobFull(%prof)) { return 0; }
+   %party = MainCharacter.getParty();
+   %cl = %c.getApparentLevel();
+   %best = 0;
+   %bestGain = 0;
+   for (%j = 0; %j < TownsPeople.getCount(); %j++)
+   {
+      %w = TownsPeople.getObject(%j);
+      if (!isObject(%w) || %w.getState() $= "Dead" || !isObject(%w.myCandidateData)) { continue; }
+      if (%w.myCandidateData.Profession !$= %prof) { continue; }
+      if (isObject(%party) && %party.getMemberIndex(%w) >= 0) { continue; }
+      %b = %w.getHomeBuilding();
+      if (!isObject(%b) || %b.getDataBlock().Occupant !$= %prof) { continue; }
+      %gain = %cl - %w.getApparentLevel();
+      if (%gain > %bestGain)
+      {
+         %bestGain = %gain;
+         %best = %w;
+      }
    }
    return %best;
 }
@@ -6197,8 +6772,14 @@ function OptJunkAll(%inTown)
             %verdict = OptKeepVerdict(%it);
             if (getWord(%verdict, 0) $= "keep") { continue; }
             // never an item the every-enemy totals say you should wear, and nothing goes on the
-            // keep check's word alone while those totals are still being added up
-            if (%verdict $= "junk" && !(%wgFresh && $OptWGPubTagOf[%id] == $OptWGPubTag && $OptWGPubSumOf[%id] > -0.5)) { continue; }
+            // keep check's word alone without its total: the item's own once done for what you
+            // wear now (OptWGItemSum, item by item), else the last finished set's
+            if (%verdict $= "junk")
+            {
+               %ws = OptWGItemSum(%id);
+               if (%ws $= "" && %wgFresh && $OptWGPubTagOf[%id] == $OptWGPubTag) { %ws = $OptWGPubSumOf[%id]; }
+               if (%ws $= "" || %ws <= -0.5) { continue; }
+            }
             if (%verdict $= "" && (OptHasEffect(%it) || OptBetterWorn(%lord, %s, %it) $= "")) { continue; }
          }
          }
@@ -6268,7 +6849,8 @@ function OptTownHasBuilding(%bdb)
 }
 
 // 1 for an item only a townsperson or a building can use that nobody in the plan uses: a work
-// tool (ProductionProfessions) whose professions are all outside %plan (OptPlanProfessions), or a
+// tool (ProductionProfessions) whose professions are all outside %plan (OptPlanProfessions) or
+// that gives no output or town quality bonus, or a
 // building's cost item (the game's item sets: tome for the Tower, crystal ball for the Tent, lute
 // for the Stage, dragon egg for the Dragon Ranch, relic for the Residence, remains for the
 // Graveyard) that no building still to be built on the town plan's lines needs. never an item the
@@ -6288,7 +6870,13 @@ function OptWorkItemUnused(%idb, %plan)
    }
    if (%profs $= "" && %need $= "") { return 0; }
    if (isObject(RequestFromKing) && isObject(RequestFromKing.requestedItem) && RequestFromKing.requestedItem.getDataBlock().getId() == %idb.getId()) { return 0; }
-   for (%w = 0; %w < getWordCount(%profs); %w++)
+   // A WORK ITEM ONLY COUNTS WHEN IT GIVES ITS WORKER SOMETHING: more output (ProductionBonusAmount,
+   // added to what the building makes) or town quality (TownQualityBonus), as
+   // Creature::applyItemDependentBonuses applies them. the player asked why Candles, Lamp and the
+   // Magnifying Glass were never sold (they give nothing at all), then "fuck salve and bandages"
+   // (their only gift, +0.2 town healing, does not count)
+   %gives = %idb.ProductionBonusAmount > 0 || %idb.TownQualityBonus != 0;
+   for (%w = 0; %gives && %w < getWordCount(%profs); %w++)
    {
       if (strstr(%plan, " " @ getWord(%profs, %w) @ " ") >= 0) { return 0; }
    }
@@ -6536,6 +7124,17 @@ function OptFoodNet()
 function OptLordInTown()
 {
    return gTown.Contains(MainCharacter.getPosition());
+}
+
+// NO POTION IN TOWN (the player: "from the moment I enter town, drink a potion should NEVER
+// appear"; it showed at the town's edge, where gTown.Contains still said outside). in town by
+// either test: Contains, or the box the game itself uses to show the town (its inventory and
+// town map button, PlayerTown::UpdateMainUI: PlayerTown::CheckCoordinates)
+function OptPotionTown()
+{
+   if (!isObject(gTown) || !isObject(MainCharacter)) { return 0; }
+   %p = MainCharacter.getPosition();
+   return OptLordInTown() || gTown.CheckCoordinates(getWord(%p, 0), getWord(%p, 1));
 }
 
 // raids: CheckForRaiderSpawn and Encounter::dailyUpdate send 2-4 raiders from a raider fort to a
@@ -7309,12 +7908,13 @@ function OptPlan()
       %nm = getStringTableEntry($ID_NEVERMINDTEXT);
       %days = gTown.CandidateTimeRemaining[%c.candidateNumber];
       %stayTxt = " · the next hire in your plan: keep " @ OptHim(%c) @ " until you can pay" @ (%days !$= "" && %days >= 0 ? " (" @ OptHe(%c) @ " stays " @ %days @ " more day" @ (%days == 1 ? "" : "s") @ ")" : "");
-      // the first hire is a food worker: until one lives in town, every other visitor is sent away
-      if (!OptHasFoodWorker())
+      // the first hire is a Farmer: until a food worker lives in town, every other visitor is sent
+      // away, the Goodman excepted (his Hostel means more visitors, OptIsSlotsHire)
+      if (!OptHasFoodWorker() && !OptIsSlotsHire(%c))
       {
          if (!OptMakesFood(%c))
          {
-            OptNow("Skip (Stop visiting)", getField(%info, 2) @ " · your first hire is a food worker (Farmer, Trapper or Herder): nobody else until then", "");
+            OptNow("Skip (Stop visiting)", getField(%info, 2) @ " · your first hire is a Farmer: nobody else until then but the Goodman (more visitors)", "");
             return;
          }
          if (isObject(%best) && %best.getId() != %c.getId() && OptMakesFood(%best))
@@ -7337,6 +7937,16 @@ function OptPlan()
          %twb = %tw.getHomeBuilding();
          %tww = %tw.GetCurrentHealth() < %tw.getMaxHealth() ? %tw.getNameString() @ " must be at full HP first (sending a hurt townsperson away costs fame)" : OptShortText(%c, getField(%info, 1));
          OptNow(%nm, getField(%info, 2) @ " · wanted: takes the place of " @ %tw.getNameString() @ (isObject(%twb) ? " (" @ %twb.getNameString() @ ")" : "") @ ", the 6 food workers become Farmers one by one · " @ %tww @ (%days !$= "" && %days >= 0 ? " · " @ OptHe(%c) @ " stays " @ %days @ " more day" @ (%days == 1 ? "" : "s") : ""), "");
+         return;
+      }
+      // A VISITOR WANTED FOR A LEVEL SWAP IS NEVER SENT AWAY (the player: a L2 Farmer visiting with a
+      // L1 Farmer in town was told "Stop visiting ... not in the town plan"). when the swap can't
+      // happen yet (gold or fame short, or the worker hurt) he is kept with Never mind
+      %lw = OptLevelSwapFor(%c);
+      if (isObject(%lw))
+      {
+         %lww = %lw.GetCurrentHealth() < %lw.getMaxHealth() ? %lw.getNameString() @ " must be at full HP first (sending a hurt townsperson away costs fame)" : OptShortText(%c, %c.HireCost);
+         OptNow(%nm, getField(%info, 2) @ " · wanted: takes the place of " @ %lw.getNameString() @ " (L" @ %lw.getApparentLevel() @ "), the same work with more HP and defense against raiders · " @ %lww @ (%days !$= "" && %days >= 0 ? " · " @ OptHe(%c) @ " stays " @ %days @ " more day" @ (%days == 1 ? "" : "s") : ""), "");
          return;
       }
       // FOOD WORKERS UP TO 6 (OptFoodShort): while fewer than 6 food workers live in town, every
@@ -7368,6 +7978,8 @@ function OptPlan()
       // a farm worker visiting at the same time counts: hire both when the gold covers both
       %l = OptTownWants(%c);
       %foodOk = OptFoodNetPlanned() >= 1;
+      // the Goodman for more visitors eats from the food in store (OptIsSlotsHire)
+      if (!%foodOk && OptIsSlotsHire(%c)) { %foodOk = 1; }
       %farmTxt = "";
       if (%l >= 0 && !%foodOk && isObject(%best) && %best.getId() != %c.getId())
       {
@@ -7444,8 +8056,10 @@ function OptPlan()
       {
          // EVERY potion in your bag counts (the player's rule: 6 potions can win a fight one
          // can't). each is drunk when you are down by a potion's worth (Creature::UseItem heals a
-         // third of max HP), so k potions fight like k x that much more HP. the fewest that win it
-         %lpots = OptPotions();
+         // third of max HP), so k potions fight like k x that much more HP. the fewest that win it.
+         // in town none (the player's rule: "from the moment I enter town, drink a potion should
+         // NEVER appear", OptPotionTown)
+         %lpots = OptPotionTown() ? 0 : OptPotions();
          %lheal = mClamp(mFloor(%mhp * 0.333), 1, 1000);
          %after = "";
          %need = 0;
@@ -7896,6 +8510,14 @@ function OptPlan()
       OptNow("Go to town and heal", "HP " @ %hp @ "/" @ %mhp @ " · " @ %hw @ " is " @ OptRateColor(%r) @ %r @ $Opt::White @ " with your HP now, " @ %rf @ " at full HP · no potion: it would heal past your max HP", %town);
       return;
    }
+   // nothing beats with the HP you have now (the search rates with it): away from town and hurt,
+   // heal first; an easy kill on the way still comes first (OptOnTheWay)
+   if (!OptLordInTown() && %hp < %mhp)
+   {
+      if (OptOnTheWay(%hp, %mhp, %town)) { return; }
+      OptNow("Go to town and heal", "HP " @ %hp @ "/" @ %mhp @ " · no site can be beaten with your HP now" @ (OptPotions() > 0 ? " and your potions" : "") @ " · rest there to full HP, then the plan goes on", %town);
+      return;
+   }
    if (OptWandererStep("no site can be beaten yet: XP from it")) { return; }
    OptNow("Nothing here you can beat yet", "no site has an enemy you beat even at full HP, counting the ones that join · get stronger gear or a level first", "");
 }
@@ -8000,7 +8622,7 @@ function OptHealFirst(%what, %rate, %hp, %mhp, %town)
 function OptDrinkInstead(%hp, %mhp, %why)
 {
    %p = OptPotions();
-   if (%p < 1 || %hp >= %mhp || OptLordInTown()) { return 0; }
+   if (%p < 1 || %hp >= %mhp || OptPotionTown()) { return 0; }
    %ph = mClamp(mFloor(%mhp * 0.333), 1, 1000);
    if (%mhp - %hp < %ph) { return 2; }
    // NO WASTED POTION (the player's rule: "why tell me to drink a potion just to tell me to go
@@ -8258,7 +8880,18 @@ function OptHuntFrom(%to)
 // counting around its spot alone left out the enemies on your side of it: three fights the
 // guide called beatable were lost that way, one of them the run.
 // loaded into group E; $OptHuntR is the radius used
+// who joins a fight against %c. THE TARGET YOU WERE SENT TO IS RATED FROM THE SAME POINT THE
+// TARGET SEARCH USED ($OptHuntCommitFrom), never from where you happen to stand on the way (the
+// player: sent to Hideout as SAFE, told on arrival it was NO, then sent back to Den)
 function OptLoadJoiners(%c)
+{
+   %was = $OptHuntFromFix;
+   if (%was $= "" && !$OptHuntFromTown && $OptHuntCommitFrom !$= "" && isObject($OptHuntObj) && isObject(%c) && %c.getId() == $OptHuntObj.getId()) { $OptHuntFromFix = $OptHuntCommitFrom; }
+   OptLoadJoinersAt(%c);
+   $OptHuntFromFix = %was;
+}
+
+function OptLoadJoinersAt(%c)
 {
    %p = %c.getPosition();
    %x = getWord(%p, 0);
@@ -8419,6 +9052,29 @@ function OptRateFull()
    return %r;
 }
 
+// the fight loaded in groups P and E rated with your lord at the search's HP ($OptHuntPlanHP,
+// OptHuntBegin) and everyone else at full HP
+function OptRatePlan()
+{
+   %L = $OptLord;
+   for (%k = 0; %k < $OptN["P"]; %k++)
+   {
+      %h[%k] = $OptHP["P", %k];
+      $OptHP["P", %k] = (%k == %L && $OptHuntPlanHP !$= "") ? OptMin($OptHuntPlanHP, $OptMHP["P", %k]) : $OptMHP["P", %k];
+   }
+   %r = getWord(OptRate(OptFight()), 0);
+   for (%k = 0; %k < $OptN["P"]; %k++) { $OptHP["P", %k] = %h[%k]; }
+   return %r;
+}
+
+// %c and its joiners at the search's HP
+function OptHuntRatePlan(%c)
+{
+   OptLoadJoiners(%c);
+   $OptHuntN = $OptN["E"];
+   return OptRatePlan();
+}
+
 // %c and its joiners at full HP: SAFE OK RISKY NO
 function OptHuntRateFull(%c)
 {
@@ -8456,11 +9112,23 @@ function OptHuntBegin()
    $OptHuntFromTown = OptLordInTown();
    $OptHuntLP = $OptHuntFromTown ? gTown.getTownCenter() : MainCharacter.getPosition();
    %L = $OptLord;
+   // THE SEARCH RATES WITH THE HP YOU WILL FIGHT WITH (the player's rule: "pick sites with the HP
+   // you have now and from where you'll arrive, so arrival never turns you back"): full HP from
+   // town (you leave rested); away from town your HP now plus what the potions in your bag heal
+   // (the step drinks them before a fight they make SAFE or OK, OptHealFirst)
+   %mhp = $OptMHP["P", %L];
+   %plan = %mhp;
+   if (!$OptHuntFromTown)
+   {
+      %plan = $OptHP["P", %L] + OptPotions() * mClamp(mFloor(%mhp * 0.333), 1, 1000);
+      if (%plan > %mhp) { %plan = %mhp; }
+   }
+   $OptHuntPlanHP = %plan;
    // a site or enemy found too strong at full HP is checked again only when your attack,
    // defense, swing or max HP change, or after 60 s. any such change drops everything remembered
    // (the counter in the key), also what was remembered for the stats you had before: swapping
    // an item back and forth must give the same target each time, not one from an old memory
-   %sig = $OptA["P", %L] @ "_" @ $OptD["P", %L] @ "_" @ $OptT["P", %L] @ "_" @ $OptMHP["P", %L];
+   %sig = $OptA["P", %L] @ "_" @ $OptD["P", %L] @ "_" @ $OptT["P", %L] @ "_" @ $OptMHP["P", %L] @ "_" @ mFloor(%plan * 10 / OptMax(%mhp, 1));
    if (%sig !$= $OptHuntSigWas) { $OptHuntSigWas = %sig; $OptHuntEpoch++; }
    $OptHuntSig = %sig @ "_" @ $OptHuntEpoch;
 }
@@ -8556,20 +9224,22 @@ function OptHuntStep(%t0)
             $OptHuntA++;
             continue;
          }
-         // a new site must be SAFE or OK; the site you were sent to stays unless it is NO
-         %lim = %com ? 2 : 1;
+         // every site must be SAFE or OK with the search's HP, the one you were sent to too: the
+         // step never gives a fight worse than OK (#151), so a site kept at RISKY only turned you
+         // back on arrival
+         %lim = 1;
          if (!%scouted)
          {
             // not seen up close: the estimate, whole or its weakest enemy alone
             OptLoadSite(%e);
-            %ok = OptRankOf(OptRateFull()) <= %lim;
+            %ok = OptRankOf(OptRatePlan()) <= %lim;
             %n = $OptN["E"];
             for (%j = 0; %j < %n && !%ok; %j++)
             {
                OptLoadSite(%e);
                OptPutEstimate(0, $OptA["E", %j], $OptD["E", %j], $OptHP["E", %j], $OptT["E", %j], $OptNm["E", %j]);
                $OptN["E"] = 1;
-               if (OptRankOf(OptRateFull()) <= %lim) { %ok = 1; }
+               if (OptRankOf(OptRatePlan()) <= %lim) { %ok = 1; }
             }
             if (%ok) { OptHuntFound("scout", %s, 0); return 1; }
             $OptHuntSiteBad[%eid] = %now TAB $OptHuntSig @ "_" @ %cnt;
@@ -8577,7 +9247,7 @@ function OptHuntStep(%t0)
             continue;
          }
          OptLoadSite(%e);
-         if (OptRankOf(OptRateFull()) <= 1) { OptHuntFound("clear", %s, 0); return 1; }
+         if (OptRankOf(OptRatePlan()) <= 1) { OptHuntFound("clear", %s, 0); return 1; }
          // its living enemies, the enemy already given first, then nearest first
          %set = %e.memberSet;
          $OptHuntMN = 0;
@@ -8600,9 +9270,9 @@ function OptHuntStep(%t0)
          }
          $OptHuntMI = 0;
       }
-      // the site you were sent to: its enemies only drop out at NO (see %com above)
+      // the site you were sent to: rated from its approach point (see %com above), SAFE or OK
       %com = (!$OptHuntFromTown && %s == $OptHuntGo);
-      %lim = %com ? 2 : 1;
+      %lim = 1;
       while ($OptHuntMI < $OptHuntMN)
       {
          %c = $OptHuntM[$OptHuntMI];
@@ -8617,7 +9287,7 @@ function OptHuntStep(%t0)
                if (!OptSliceLeft(%t0, %done, 4)) { return 0; }
                %done++;
                $OptHuntFromFix = %com ? $OptHuntCommitFrom : "";
-               %hr = OptRankOf(OptHuntRateFull(%c));
+               %hr = OptRankOf(OptHuntRatePlan(%c));
                $OptHuntFromFix = "";
                if (%hr <= %lim) { OptHuntFound("hunt", %s, %c); return 1; }
                if (!%com) { $OptHuntBad[%id] = %now TAB $OptHuntSig; }
@@ -8901,7 +9571,9 @@ function OptGearLine()
    if ($OptNowGear || $OptSiteN < 1) { return ""; }
    // still adding up (the player: "a (Calculating gear...) check appears as well" while the best
    // gear is worked out, so an item not asked for yet is not taken for a mistake)
-   if (!OptWGFresh()) { return $Opt::Orange @ "Gear: (Calculating gear... " @ OptWGProgress() @ ") your items against every enemy left on the map; the equip step comes when it is done" @ $Opt::White @ "\n"; }
+   // also while an item just picked up is still being added up (the player got a Leather Helm and
+   // saw no calculating line: a new item leaves the finished totals standing, only adds to them)
+   if (!OptWGFresh() || OptWGPending()) { return $Opt::Orange @ "Gear: (Calculating gear... " @ OptWGProgress() @ ") your items against every enemy left on the map; the equip step comes when it is done" @ $Opt::White @ "\n"; }
    %t = "Gear: best as is over the " @ $OptWGPubEnemies @ " enemies left on the map";
    for (%s = 1; %s < 4; %s++)
    {

@@ -8,4 +8,4 @@ Each mod is a `tools` folder of TorqueScript that the game loads on its own: its
 
 | Mod | Description |
 | --- | --- |
-| [GuideOverlay](GuideOverlay) | Step-by-step guide to all 9 achievements: what to fight, wear, loot, hire and build next. |
+| [GuidedPlayOverhaul](GuidedPlayOverhaul) | Guided play built around all 9 achievements: what to fight, wear, loot, hire, build and research next, with auto-attack, auto potion and potion buttons. |
