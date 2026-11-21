@@ -7,6 +7,7 @@ Mods for several games. Each game has its own folder, and each mod has its own R
 | Game | Mods |
 | --- | --- |
 | [Cuphead](cuphead) | No Flashing |
+| [Hinterland](hinterland) | Guide Overlay |
 | [Melvor Idle](melvor-idle) | Synergy Guard, Skill Limit, Auto Equip, Time Warp, Shop Filter, Unlimited Bank, Bank Gear Filter, Fight Advisor, Gear Planner |
 | [Pro Evolution Soccer 5](pes5) | Overall Rating, Optimal Squad, Real Names |
 
