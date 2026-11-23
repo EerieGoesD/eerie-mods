@@ -8,7 +8,7 @@ The first screen shows the overall percentage, the NEXT step and where to do it,
 
 | List | What it counts |
 | --- | --- |
-| STORY | 33 main story steps in order: badges, rival battles, Rocket hideouts, Elite Four |
+| STORY | 35 main story steps in order, from walking into the grass for Oak to the Elite Four: badges, rival battles, Rocket hideouts, and the key items each step needs |
 | POKéDEX | All 151, with where to catch, evolve or trade for each one in Red |
 | ITEMS | 104 item balls on the maps, plus the POTION a new game leaves in your PC |
 | HIDDEN | 52 hidden items and 12 hidden coin spots on the Game Corner floor |

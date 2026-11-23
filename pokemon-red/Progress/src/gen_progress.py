@@ -241,30 +241,32 @@ ms("ALWAYS", [("PROG_ALWAYS", "0", False)], 0)
 
 # ---------- STORY (the main path; each step is also a milestone)
 STORY = [
+    ("S_OAK", [E("EVENT_FOLLOWED_OAK_INTO_LAB")], "Go into the grass", "PALLET TOWN, north", "PALLET_TOWN", None),
     ("S_STARTER", [E("EVENT_GOT_STARTER")], "Choose a POKéMON", "OAK'S LAB", "OAKS_LAB", None),
     ("S_PARCEL", [E("EVENT_GOT_OAKS_PARCEL")], "Get OAK'S PARCEL", "VIRIDIAN MART", "VIRIDIAN_CITY", None),
     ("S_DEX", [E("EVENT_GOT_POKEDEX")], "Take parcel to OAK", "OAK'S LAB", "OAKS_LAB", None),
     ("S_BROCK", [E("EVENT_BEAT_BROCK")], "Beat BROCK", "PEWTER GYM", "PEWTER_GYM", None),
     ("S_MTMOON", [E("EVENT_BEAT_MT_MOON_EXIT_SUPER_NERD")], "Cross MT.MOON", "MT.MOON B2F", "MT_MOON_B2F", None),
-    ("S_RIVAL1", [E("EVENT_BEAT_CERULEAN_RIVAL")], "Beat your rival", "CERULEAN CITY", "CERULEAN_CITY", None),
+    ("S_RIVAL1", [E("EVENT_BEAT_CERULEAN_RIVAL")], "Beat your rival", "CERULEAN north", "CERULEAN_CITY", None),
     ("S_MISTY", [E("EVENT_BEAT_MISTY")], "Beat MISTY", "CERULEAN GYM", "CERULEAN_GYM", None),
-    ("S_TICKET", [E("EVENT_GOT_SS_TICKET")], "Help BILL", "ROUTE 25", "ROUTE_25", None),
+    ("S_TICKET", [E("EVENT_GOT_SS_TICKET")], "Help BILL", "BILL'S HOUSE", "BILLS_HOUSE", None),
     ("S_HM01", [E("EVENT_GOT_HM01")], "Get HM01 CUT", "S.S.ANNE CAPTAIN", "SS_ANNE_CAPTAINS_ROOM", None),
     ("S_SURGE", [E("EVENT_BEAT_LT_SURGE")], "Beat LT.SURGE", "VERMILION GYM", "VERMILION_GYM", "CUT"),
-    ("S_THIEF", [E("EVENT_BEAT_CERULEAN_ROCKET_THIEF")], "Beat the thief", "CERULEAN CITY", "CERULEAN_CITY", None),
+    ("S_THIEF", [E("EVENT_BEAT_CERULEAN_ROCKET_THIEF")], "Beat the thief", "CERULEAN backyard", "CERULEAN_CITY", None),
     ("S_ERIKA", [E("EVENT_BEAT_ERIKA")], "Beat ERIKA", "CELADON GYM", "CELADON_GYM", "CUT"),
-    ("S_HIDEOUT", [E("EVENT_BEAT_ROCKET_HIDEOUT_GIOVANNI")], "Beat GIOVANNI", "ROCKET HIDEOUT B4", "ROCKET_HIDEOUT_B4F", "CUT"),
+    ("S_POSTER", [E("EVENT_FOUND_ROCKET_HIDEOUT")], "Find the hideout", "GAME CORNER poster", "GAME_CORNER", "GCROCKET"),
+    ("S_HIDEOUT", [E("EVENT_BEAT_ROCKET_HIDEOUT_GIOVANNI")], "Beat GIOVANNI", "ROCKET HIDEOUT B4", "ROCKET_HIDEOUT_B4F", "LIFTKEY"),
     ("S_RIVAL2", [E("EVENT_BEAT_POKEMON_TOWER_RIVAL")], "Beat your rival", "POKéMON TOWER 2F", "POKEMON_TOWER_2F", None),
-    ("S_GHOST", [E("EVENT_BEAT_GHOST_MAROWAK")], "Calm the ghost", "POKéMON TOWER 6F", "POKEMON_TOWER_6F", None),
+    ("S_GHOST", [E("EVENT_BEAT_GHOST_MAROWAK")], "Calm the ghost", "POKéMON TOWER 6F", "POKEMON_TOWER_6F", "SCOPE"),
     ("S_FUJI", [E("EVENT_RESCUED_MR_FUJI")], "Rescue MR.FUJI", "POKéMON TOWER 7F", "POKEMON_TOWER_7F", None),
     ("S_FLUTE", [E("EVENT_GOT_POKE_FLUTE")], "Get the POKé FLUTE", "MR.FUJI'S HOUSE", "MR_FUJIS_HOUSE", None),
     ("S_SNORLAX", [E("EVENT_BEAT_ROUTE12_SNORLAX"), E("EVENT_BEAT_ROUTE16_SNORLAX")], "Wake a SNORLAX", "ROUTE 12 or 16", "ROUTE_12", None),
     ("S_KOGA", [E("EVENT_BEAT_KOGA")], "Beat KOGA", "FUCHSIA GYM", "FUCHSIA_GYM", None),
-    ("S_HM03", [E("EVENT_GOT_HM03")], "Get HM03 SURF", "SAFARI ZONE", "SAFARI_ZONE_SECRET_HOUSE", None),
-    ("S_HM04", [E("EVENT_GOT_HM04")], "Get HM04 STRENGTH", "WARDEN'S HOUSE", "WARDENS_HOUSE", None),
-    ("S_DRINK", [("PROG_FLAGS1", "BIT_GAVE_SAFFRON_GUARDS_DRINK", False)], "Give guard a drink", "SAFFRON GATES", "SAFFRON_CITY", None),
+    ("S_HM03", [E("EVENT_GOT_HM03")], "Get HM03 SURF", "SAFARI ZONE HOUSE", "SAFARI_ZONE_SECRET_HOUSE", None),
+    ("S_HM04", [E("EVENT_GOT_HM04")], "Get HM04 STRENGTH", "WARDEN, GOLD TEETH", "WARDENS_HOUSE", "GOLDTEETH"),
+    ("S_DRINK", [("PROG_FLAGS1", "BIT_GAVE_SAFFRON_GUARDS_DRINK", False)], "Give guard a drink", "Buy: CELADON ROOF", "SAFFRON_CITY", None),
     ("S_RIVAL3", [E("EVENT_BEAT_SILPH_CO_RIVAL")], "Beat your rival", "SILPH CO.7F", "SILPH_CO_7F", None),
-    ("S_SILPH", [E("EVENT_BEAT_SILPH_CO_GIOVANNI")], "Beat GIOVANNI", "SILPH CO.11F", "SILPH_CO_11F", None),
+    ("S_SILPH", [E("EVENT_BEAT_SILPH_CO_GIOVANNI")], "Beat GIOVANNI", "SILPH CO.11F", "SILPH_CO_11F", "CARDKEY"),
     ("S_SABRINA", [E("EVENT_BEAT_SABRINA")], "Beat SABRINA", "SAFFRON GYM", "SAFFRON_GYM", None),
     ("S_BLAINE", [E("EVENT_BEAT_BLAINE")], "Beat BLAINE", "CINNABAR GYM", "CINNABAR_GYM", "SECRETKEY"),
     ("S_GIOVANNI", [E("EVENT_BEAT_VIRIDIAN_GYM_GIOVANNI")], "Beat GIOVANNI", "VIRIDIAN GYM", "VIRIDIAN_GYM", None),
@@ -372,10 +374,10 @@ gate("CUT", "ROUTE_9", "ROUTE_10", "ROCK_TUNNEL_1F", "ROCK_TUNNEL_B1F", "ROCK_TU
      "LAVENDER_TOWN", "MR_FUJIS_HOUSE", "ROUTE_8", "UNDERGROUND_PATH_ROUTE_8", "UNDERGROUND_PATH_WEST_EAST",
      "UNDERGROUND_PATH_ROUTE_7", "ROUTE_7", "CELADON_CITY", "CELADON_GYM", "CELADON_MART_3F",
      "CELADON_MART_ROOF", "CELADON_DINER", "CELADON_MANSION_ROOF_HOUSE", "GAME_CORNER",
-     "ROCKET_HIDEOUT_B1F", "ROCKET_HIDEOUT_B2F", "ROCKET_HIDEOUT_B3F", "ROCKET_HIDEOUT_B4F",
      "POKEMON_TOWER_1F", "POKEMON_TOWER_2F", "POKEMON_TOWER_3F", "POKEMON_TOWER_4F", "POKEMON_TOWER_5F",
      "VERMILION_GYM")
 gate("S_HIDEOUT", "POKEMON_TOWER_6F", "POKEMON_TOWER_7F")
+gate("S_POSTER", "ROCKET_HIDEOUT_B1F", "ROCKET_HIDEOUT_B2F", "ROCKET_HIDEOUT_B3F", "ROCKET_HIDEOUT_B4F")
 gate("S_FLUTE", "ROUTE_12", "ROUTE_13", "ROUTE_14", "ROUTE_15", "ROUTE_12_GATE_2F", "ROUTE_12_SUPER_ROD_HOUSE",
      "ROUTE_15_GATE_2F", "FUCHSIA_CITY", "FUCHSIA_GYM", "FUCHSIA_GOOD_ROD_HOUSE", "SAFARI_ZONE_GATE",
      "SAFARI_ZONE_CENTER", "SAFARI_ZONE_EAST", "SAFARI_ZONE_NORTH", "SAFARI_ZONE_WEST",
@@ -403,7 +405,7 @@ gate(VRGATE, "INDIGO_PLATEAU")
 gate("SECRETKEY", "CINNABAR_GYM")
 
 # ---------- travel order (what is next to what)
-ORDER2 = """PALLET_TOWN REDS_HOUSE_1F REDS_HOUSE_2F BLUES_HOUSE OAKS_LAB ROUTE_1 VIRIDIAN_CITY VIRIDIAN_MART
+ORDER2 = """REDS_HOUSE_2F REDS_HOUSE_1F PALLET_TOWN BLUES_HOUSE OAKS_LAB ROUTE_1 VIRIDIAN_CITY VIRIDIAN_MART
 ROUTE_22 ROUTE_2 ROUTE_2_TRADE_HOUSE VIRIDIAN_FOREST_SOUTH_GATE VIRIDIAN_FOREST VIRIDIAN_FOREST_NORTH_GATE
 PEWTER_CITY MUSEUM_1F PEWTER_GYM ROUTE_3 MT_MOON_POKECENTER MT_MOON_1F MT_MOON_B1F MT_MOON_B2F ROUTE_4
 CERULEAN_CITY CERULEAN_TRADE_HOUSE CERULEAN_GYM BIKE_SHOP ROUTE_24 ROUTE_25 BILLS_HOUSE ROUTE_5
@@ -519,6 +521,17 @@ for mp, cell, name, checks, mode, extra in items:
     it_entries.append(Entry(checks, name, mapname(mp), g, OK(mp), mode, mp))
 
 
+# key items a story step needs (picked up = its ball is gone; two only appear after an event)
+_ball = {}
+for mp, cell, name, checks, mode, extra in items:
+    _ball[name] = checks
+for key, name, rank in (("LIFTKEY", "LIFT KEY", R("S_HIDEOUT") - 0.2), ("SCOPE", "SILPH SCOPE", R("S_GHOST") - 0.2),
+                        ("CARDKEY", "CARD KEY", R("S_SILPH") - 0.2), ("GOLDTEETH", "GOLD TEETH", R("S_HM04") - 0.2)):
+    c = _ball[name]
+    ms(key, [(k, a, False) for k, a in c], rank, "PROG_BOTH")
+_gcr = OBJ2TOGGLE["GAMECORNER_ROCKET"][0]
+ms("GCROCKET", [(K_TOGGLE, _gcr, False)], R("S_POSTER") - 0.2)  # the Rocket moves away from the poster
+
 # ---------- HIDDEN items: need the Itemfinder to find them
 coords = re.findall(r"hidden_item (\w+),\s*(\d+),\s*(\d+)(.*)", rd("data/events/hidden_item_coords.asm"))
 hidden_ev = {}
@@ -605,9 +618,9 @@ GIFTS = [
     (("PROG_FLAGS1", "BIT_GOT_SUPER_ROD", False), "SUPER ROD", "ROUTE 12 HOUSE", "ROUTE_12_SUPER_ROD_HOUSE", []),
     (E("EVENT_GOT_TM41"), "TM41", "CELADON CITY", "CELADON_CITY", []),
     (E("EVENT_GOT_TM18"), "TM18", "CELADON MART 3F", "CELADON_MART_3F", []),
-    (E("EVENT_GOT_TM13"), "TM13", "CELADON MART ROOF", "CELADON_MART_ROOF", []),
-    (E("EVENT_GOT_TM48"), "TM48", "CELADON MART ROOF", "CELADON_MART_ROOF", []),
-    (E("EVENT_GOT_TM49"), "TM49", "CELADON MART ROOF", "CELADON_MART_ROOF", []),
+    (E("EVENT_GOT_TM13"), "TM13", "ROOF, FRESH WATER", "CELADON_MART_ROOF", []),
+    (E("EVENT_GOT_TM48"), "TM48", "ROOF, SODA POP", "CELADON_MART_ROOF", []),
+    (E("EVENT_GOT_TM49"), "TM49", "ROOF, LEMONADE", "CELADON_MART_ROOF", []),
     (E("EVENT_GOT_TM21"), "TM21", "CELADON GYM", "CELADON_GYM", ["S_ERIKA"]),
     (E("EVENT_GOT_COIN_CASE"), "COIN CASE", "CELADON DINER", "CELADON_DINER", []),
     (E("EVENT_GOT_10_COINS"), "10 COINS", "GAME CORNER", "GAME_CORNER", ["COINCASE"]),
@@ -618,7 +631,7 @@ GIFTS = [
     (("PROG_FLAGS1", "BIT_GOT_GOOD_ROD", False), "GOOD ROD", "FUCHSIA CITY", "FUCHSIA_GOOD_ROD_HOUSE", []),
     (E("EVENT_GOT_TM06"), "TM06", "FUCHSIA GYM", "FUCHSIA_GYM", ["S_KOGA"]),
     (E("EVENT_GOT_TM29"), "TM29", "MR.PSYCHIC'S HOUSE", "MR_PSYCHICS_HOUSE", []),
-    (E("EVENT_GOT_TM31"), "TM31", "COPYCAT'S HOUSE", "COPYCATS_HOUSE_2F", []),
+    (E("EVENT_GOT_TM31"), "TM31", "COPYCAT, POKé DOLL", "COPYCATS_HOUSE_2F", []),
     (E("EVENT_GOT_TM36"), "TM36", "SILPH CO.2F", "SILPH_CO_2F", []),
     (E("EVENT_GOT_MASTER_BALL"), "MASTER BALL", "SILPH CO.11F", "SILPH_CO_11F", ["S_SILPH"]),
     (E("EVENT_GOT_TM46"), "TM46", "SAFFRON GYM", "SAFFRON_GYM", ["S_SABRINA"]),
@@ -634,7 +647,7 @@ STORY_OF["VOUCHER"] = "S_MTMOON"
 ms("OWN150", [("PROG_OWNCOUNT", "150", False)], R("S_CHAMPION") + 1)  # all but Mew, as the game designer checks
 gift_entries = [Entry([(K_EVENT, "PROGRESS_DIPLOMA_EVENT")], "DIPLOMA", "CELADON MANSION 3F",
                       combine(G["CELADON_MANSION_3F"], "OWN150"), OK("CELADON_MANSION_3F"))]  # the mod marks it
-gift_entries += [Entry([(K_TOGGLE, OBJ2TOGGLE["CERULEANCITY_ROCKET"][0])], ITEMNAME["TM28"], "CERULEAN CITY",
+gift_entries += [Entry([(K_TOGGLE, OBJ2TOGGLE["CERULEANCITY_ROCKET"][0])], ITEMNAME["TM28"], "CERULEAN backyard",
                       combine("S_THIEF", place_gate("CERULEAN_CITY", obj_cell("CERULEAN_CITY",
                                                                                "TEXT_CERULEANCITY_ROCKET"))),
                       OK("CERULEAN_CITY"))]
@@ -990,6 +1003,13 @@ out.append("")
 for i, (title, heading, ents) in enumerate(categories):
     out.append('ProgCatName%d: db "%s@"' % (i, title))
     out.append('ProgCatHeading%d: db "%s@"' % (i, heading))
+out.append("")
+out.append("ProgressMapOrder:")
+out.append("; each map's place in travel order, so NEXT can put steps on the player's own map first ($ff: none)")
+_mo = [ORDER2.index(m) if m in ORDER2 else 255 for m in MAPS]
+assert all(e.order < 255 for _, _, ents in categories for e in ents)
+for i in range(0, len(_mo), 16):
+    out.append("\tdb " + ", ".join("$%02x" % v for v in _mo[i:i + 16]))
 out.append("")
 out.append("ProgressMilestones:")
 out.append("; 6 bytes each: first check, then a second check (unused unless the first has PROG_EITHER/BOTH)")
