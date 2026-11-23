@@ -1,0 +1,5975 @@
+diff --git a/constants/event_constants.asm b/constants/event_constants.asm
+index 7f4213f..bd5dc58 100644
+--- a/constants/event_constants.asm
++++ b/constants/event_constants.asm
+@@ -775,3 +775,13 @@ DEF INDIGO_PLATEAU_EVENTS_END EQU const_value - 1
+ ; End of events
+ 	const_next $A00
+ DEF NUM_EVENTS EQU const_value
++
++; Unused event flag (inside the const_skip 17 after EVENT_PALLET_AFTER_GETTING_POKEBALLS),
++; kept by the PROGRESS menu for its In-game HUD setting
++DEF PROGRESS_HUD_EVENT EQU 10
++; Unused event flag in the same gap: set by the PROGRESS menu once the POTION a new game puts in
++; the PC has been taken out
++DEF PROGRESS_PC_POTION_EVENT EQU 11
++; Unused event flag in the same gap: set by the PROGRESS menu when the game designer shows the
++; diploma (the game keeps no record of it)
++DEF PROGRESS_DIPLOMA_EVENT EQU 12
+diff --git a/engine/events/diploma.asm b/engine/events/diploma.asm
+index e2a34a3..f6e4c6d 100644
+--- a/engine/events/diploma.asm
++++ b/engine/events/diploma.asm
+@@ -1,7 +1,7 @@
+ DEF CIRCLE_TILE_ID EQU $70
+ 
+ DisplayDiploma::
+-	call SaveScreenTilesToBuffer2
++	call DisplayDiplomaMarkProgress ; marks the diploma for PROGRESS, then SaveScreenTilesToBuffer2
+ 	call GBPalWhiteOutWithDelay3
+ 	call ClearScreen
+ 	xor a
+@@ -115,3 +115,13 @@ DiplomaCongrats:
+ 
+ DiplomaGameFreak:
+ 	db "GAME FREAK@"
++
++; in the bank's free space so nothing above moves
++PUSHS
++SECTION "Diploma Progress", ROMX, BANK[$15]
++
++DisplayDiplomaMarkProgress:
++	ld hl, wEventFlags + PROGRESS_DIPLOMA_EVENT / 8
++	set PROGRESS_DIPLOMA_EVENT % 8, [hl]
++	jp SaveScreenTilesToBuffer2
++POPS
+diff --git a/engine/menus/draw_start_menu.asm b/engine/menus/draw_start_menu.asm
+index 7a04852..76ceed1 100644
+--- a/engine/menus/draw_start_menu.asm
++++ b/engine/menus/draw_start_menu.asm
+@@ -2,21 +2,21 @@
+ DrawStartMenu::
+ 	CheckEvent EVENT_GOT_POKEDEX
+ ; menu with pokedex
+-	hlcoord 10, 0
+-	ld b, $0e
+-	ld c, $08
++	hlcoord 9, 0
++	ld b, $10
++	ld c, $09
+ 	jr nz, .drawTextBoxBorder
+ ; shorter menu if the player doesn't have the pokedex
+-	hlcoord 10, 0
+-	ld b, $0c
+-	ld c, $08
++	hlcoord 9, 0
++	ld b, $0e
++	ld c, $09
+ .drawTextBoxBorder
+ 	call TextBoxBorder
+ 	ld a, PAD_DOWN | PAD_UP | PAD_START | PAD_B | PAD_A
+ 	ld [wMenuWatchedKeys], a
+ 	ld a, $02
+ 	ld [wTopMenuItemY], a ; Y position of first menu choice
+-	ld a, $0b
++	ld a, $0a
+ 	ld [wTopMenuItemX], a ; X position of first menu choice
+ 	ld a, [wBattleAndStartSavedMenuItem] ; remembered menu selection from last time
+ 	ld [wCurrentMenuItem], a
+@@ -25,15 +25,15 @@ DrawStartMenu::
+ 	ld [wMenuWatchMovingOutOfBounds], a
+ 	ld hl, wStatusFlags5
+ 	set BIT_NO_TEXT_DELAY, [hl]
+-	hlcoord 12, 2
++	hlcoord 11, 2
+ 	CheckEvent EVENT_GOT_POKEDEX
+ ; case for not having pokedex
+-	ld a, $06
++	ld a, $07
+ 	jr z, .storeMenuItemCount
+ ; case for having pokedex
+ 	ld de, StartMenuPokedexText
+ 	call PrintStartMenuItem
+-	ld a, $07
++	ld a, $08
+ .storeMenuItemCount
+ 	ld [wMaxMenuItem], a ; number of menu items
+ 	ld de, StartMenuPokemonText
+@@ -53,8 +53,8 @@ DrawStartMenu::
+ 	call PrintStartMenuItem
+ 	ld de, StartMenuOptionText
+ 	call PrintStartMenuItem
+-	ld de, StartMenuExitText
+-	call PlaceString
++	ld de, StartMenuProgressText
++	call PrintStartMenuProgressAndExit
+ 	ld hl, wStatusFlags5
+ 	res BIT_NO_TEXT_DELAY, [hl]
+ 	ret
+@@ -87,3 +87,16 @@ PrintStartMenuItem:
+ 	ld de, SCREEN_WIDTH * 2
+ 	add hl, de
+ 	ret
++
++; PROGRESS sits in the bank's free space so nothing above moves
++PUSHS
++SECTION "Start Menu Progress Item", ROMX, BANK[$01]
++
++StartMenuProgressText:
++	db "PROGRESS@"
++
++PrintStartMenuProgressAndExit:
++	call PrintStartMenuItem
++	ld de, StartMenuExitText
++	jp PlaceString
++POPS
+diff --git a/engine/menus/progress.asm b/engine/menus/progress.asm
+new file mode 100644
+index 0000000..4a9e7fd
+--- /dev/null
++++ b/engine/menus/progress.asm
+@@ -0,0 +1,1181 @@
++; PROGRESS start menu option: what is left to do for 100%, and the next step towards it.
++; Every check reads flags the game already keeps. The only new saved setting, In-game HUD,
++; uses an event flag the game never touches (PROGRESS_HUD_EVENT).
++
++; check kinds (the low 5 bits of a check byte)
++DEF PROG_EVENT     EQU 0
++DEF PROG_TOGGLE    EQU 1
++DEF PROG_HIDDEN    EQU 2
++DEF PROG_TRADE     EQU 3
++DEF PROG_DEX       EQU 4
++DEF PROG_FLAGS1    EQU 5
++DEF PROG_FLAGS4    EQU 6
++DEF PROG_HIDDENCOIN EQU 7
++DEF PROG_SSANNE2F  EQU 8 ; S.S. Anne 2F map script: bit 2 is only set once the rival battle is over
++DEF PROG_TOWN      EQU 9 ; argument: town map id
++DEF PROG_MILESTONE EQU 10 ; argument: milestone number
++DEF PROG_ALWAYS    EQU 11
++DEF PROG_OWNCOUNT  EQU 12 ; argument: how many Pokemon must be owned
++DEF PROG_INVERT    EQU %00100000 ; the check passes when the flag is NOT set
++DEF PROG_EITHER    EQU %10000000 ; a second check follows, either one counts
++DEF PROG_BOTH      EQU %11000000 ; a second check follows, both are needed
++DEF PROG_KIND_MASK  EQU %00011111
++DEF PROG_CHECK_MASK EQU %00111111
++
++DEF PROG_FIRST_ROW EQU 6  ; summary: row of the first category
++DEF PROG_HUD_ROW   EQU PROG_FIRST_ROW + 9 ; under the last list (checked at the end)
++DEF PROG_LIST_TOP  EQU 2  ; list: row of the first entry
++DEF PROG_PAGE      EQU 8  ; list: entries per screen
++DEF PROG_PERCENT   EQU $f0 ; font slot borrowed for "%" while the screen is open
++
++ProgressMenu::
++	ld de, ProgressPercentGlyph
++	ld hl, vFont tile (PROG_PERCENT - $80)
++	lb bc, BANK(ProgressPercentGlyph), 1
++	call CopyVideoDataDouble
++	ldh a, [hJoy6]
++	push af
++	ldh a, [hJoy7]
++	push af
++	ld a, 1 ; repeat held directions, never A or B
++	ldh [hJoy7], a
++	xor a
++	ldh [hJoy6], a
++	ld [wProgCursor], a
++.redraw
++	call ProgressDrawSummary
++.loop
++	call ProgressGetInput
++	bit B_PAD_B, a
++	jr nz, .exit
++	bit B_PAD_START, a
++	jr nz, .exit
++	bit B_PAD_A, a
++	jr nz, .open
++	bit B_PAD_UP, a
++	jr nz, .up
++	bit B_PAD_DOWN, a
++	jr z, .loop
++	ld a, [wProgCursor]
++	inc a
++	cp NUM_PROGRESS_CATEGORIES + 1
++	jr c, .move
++	xor a
++	jr .move
++.up
++	ld a, [wProgCursor]
++	and a
++	jr nz, .dec
++	ld a, NUM_PROGRESS_CATEGORIES + 1
++.dec
++	dec a
++.move
++	push af
++	call ProgressCursorAddr
++	ld [hl], ' '
++	pop af
++	ld [wProgCursor], a
++	call ProgressCursorAddr
++	ld [hl], '▶'
++	jr .loop
++.open
++	ld a, SFX_PRESS_AB
++	call PlaySound
++	ld a, [wProgCursor]
++	cp NUM_PROGRESS_CATEGORIES
++	jr z, .toggleHud
++	ld [wProgCat], a
++	call ProgressList
++	jr .redraw
++.toggleHud
++	ld hl, wEventFlags + PROGRESS_HUD_EVENT / 8
++	ld a, [hl]
++	xor 1 << (PROGRESS_HUD_EVENT % 8)
++	ld [hl], a
++	call ProgressPrintHud
++	jr .loop
++.exit
++	ld a, SFX_PRESS_AB
++	call PlaySound
++	pop af
++	ldh [hJoy7], a
++	pop af
++	ldh [hJoy6], a
++	ld de, FontGraphics + (PROG_PERCENT - $80) * TILE_1BPP_SIZE
++	ld hl, vFont tile (PROG_PERCENT - $80)
++	lb bc, BANK(FontGraphics), 1
++	jp CopyVideoDataDouble
++
++ProgressOverworld::
++; Called each frame the player stands still on the map. Carry if a box was shown.
++	call ProgressCheckPcPotion
++	ld a, [wStatusFlags5]
++	bit BIT_SCRIPTED_MOVEMENT_STATE, a
++	jr nz, .no
++	ld a, [wJoyIgnore]
++	and a
++	jr nz, .no ; a map script has the controls; look again once it is done
++	ld a, [wCurMap]
++	ld hl, wProgLastMap
++	cp [hl]
++	jr z, .select
++	ld [hl], a
++	call ProgressFindWarning
++	jr nc, .select
++	ld a, l
++	ld [wProgBestPtr], a
++	ld a, h
++	ld [wProgBestPtr + 1], a
++	call ProgressShowWarning
++	scf
++	ret
++.select
++	ldh a, [hJoyPressed]
++	bit B_PAD_SELECT, a
++	jr z, .no
++	ld a, [wEventFlags + PROGRESS_HUD_EVENT / 8]
++	bit PROGRESS_HUD_EVENT % 8, a
++	jr z, .no
++	call ProgressShowHud
++	scf
++	ret
++.no
++	and a
++	ret
++
++ProgressCheckPcPotion:
++; The game keeps no record of the POTION a new game puts in the PC, so mark it taken as soon
++; as the PC holds no POTION
++	ld a, [wEventFlags + PROGRESS_PC_POTION_EVENT / 8]
++	bit PROGRESS_PC_POTION_EVENT % 8, a
++	ret nz
++	ld hl, wBoxItems
++.loop
++	ld a, [hli]
++	cp -1
++	jr z, .taken
++	cp POTION
++	ret z
++	inc hl
++	jr .loop
++.taken
++	ld hl, wEventFlags + PROGRESS_PC_POTION_EVENT / 8
++	set PROGRESS_PC_POTION_EVENT % 8, [hl]
++	ret
++
++; the same steps as DisplayTextID, with a PROGRESS box in place of a map text
++ProgressShowHud:
++	ldh a, [hLoadedROMBank]
++	push af
++	ld a, 1 ; not the start menu, so the standard box is set up
++	ldh [hTextID], a
++	farcall DisplayTextIDInit
++	call ProgressHud
++	jp CloseTextDisplay
++
++ProgressShowWarning:
++	ldh a, [hLoadedROMBank]
++	push af
++	ld a, 1
++	ldh [hTextID], a
++	farcall DisplayTextIDInit
++	call ProgressWarnBox
++	jp CloseTextDisplay
++
++ProgressHud:
++; SELECT on the map: the next objective in a box at the bottom, until a button is pressed
++	hlcoord 0, 10
++	lb bc, 6, 18
++	call TextBoxBorder
++	ld a, 12
++	ld c, 2
++	call ProgressDrawNext
++	; fallthrough
++
++ProgressWaitButton:
++	call DelayFrame
++	call Joypad
++	ldh a, [hJoyPressed]
++	and PAD_A | PAD_B | PAD_START | PAD_SELECT
++	jr z, ProgressWaitButton
++	ret
++
++ProgressWarnBox:
++; the warning at [wProgBestPtr]; [wProgPct] = how many of its things are not done ($ff: no list)
++	hlcoord 0, 10
++	lb bc, 6, 18
++	call TextBoxBorder
++	hlcoord 1, 11
++	ld de, ProgressWarningText
++	call PlaceString
++	ld a, [wProgBestPtr]
++	ld l, a
++	ld a, [wProgBestPtr + 1]
++	ld h, a
++	inc hl
++	inc hl
++	ld a, 12
++.lines
++	push af
++	cp 15
++	jr nz, .row
++	ld a, 16 ; the fourth line goes under the count
++.row
++	push hl
++	call ProgressRowAddr
++	ld d, h
++	ld e, l
++	pop hl
++	ld a, [hli]
++	ld c, a
++	ld a, [hli]
++	ld b, a
++	push hl
++	ld h, d
++	ld l, e
++	ld d, b
++	ld e, c
++	call ProgressPlaceString
++	pop hl
++	pop af
++	inc a
++	cp 16
++	jr c, .lines
++	ld a, [wProgPct]
++	cp $ff
++	jr z, .wait
++	hlcoord 1, 15
++	ld de, ProgressNotDoneText
++	call PlaceString
++	ld a, [wProgPct]
++	ld [wProgPrint], a
++	hlcoord 15, 15
++	ld de, wProgPrint
++	lb bc, 1, 3
++	call PrintNumber
++.wait
++	jr ProgressWaitButton
++
++ProgressFindWarning:
++; a warning for the map the player is on whose condition holds and that still has something
++; to lose: hl = its record, [wProgPct] = how many are not done ($ff: no list); carry if found
++	ld hl, ProgressWarnings
++.loop
++	ld a, [hl]
++	cp $ff
++	jr z, .none
++	ld b, a
++	ld a, [wCurMap]
++	cp b
++	jr nz, .next
++	push hl
++	inc hl
++	ld a, [hl]
++	call ProgressMilestoneDone
++	pop hl
++	jr z, .next
++	push hl
++	call ProgressWarnCount
++	pop hl
++	and a
++	jr z, .next
++	ld [wProgPct], a
++	scf
++	ret
++.next
++	ld bc, 12
++	add hl, bc
++	jr .loop
++.none
++	and a
++	ret
++
++ProgressWarnCount:
++; hl = warning; a = how many entries in its list are not done ($ff if it has no list)
++	ld bc, 10
++	add hl, bc
++	ld a, [hli]
++	ld h, [hl]
++	ld l, a
++	or h
++	jr nz, .list
++	ld a, $ff
++	ret
++.list
++	xor a
++	ld [wProgRow], a
++.loop
++	ld a, [hli]
++	ld e, a
++	ld a, [hli]
++	ld d, a
++	or e
++	jr z, .end
++	push hl
++	ld h, d
++	ld l, e
++	call ProgressEntryDone
++	pop hl
++	jr c, .loop
++	ld a, [wProgRow]
++	inc a
++	ld [wProgRow], a
++	jr .loop
++.end
++	ld a, [wProgRow]
++	ret
++
++ProgressDrawNext:
++; "NEXT: <list>" on row a, then the step's two lines c rows apart, from column 1
++	ld [wProgRow], a
++	ld a, c
++	ld [wProgPct], a
++	ld a, [wProgRow]
++	call ProgressRowAddr
++	ld de, ProgressNextText
++	call PlaceString
++	call ProgressFindNext
++	jr nc, .found
++	call ProgressNextLine
++	ld de, ProgressAllDoneText
++	jp PlaceString
++.found
++	push hl
++	ld a, [wProgRow]
++	call ProgressRowAddr
++	ld bc, 6
++	add hl, bc
++	call ProgressGetHeading
++	call PlaceString
++	pop hl
++	call ProgressEntryStrings
++	push bc
++	call ProgressNextLine
++	call ProgressPlaceString
++	pop de
++	call ProgressNextLine
++	jp ProgressPlaceString
++
++ProgressNextLine:
++; hl = column 1 of the next line (wProgRow += wProgPct). de is kept.
++	ld a, [wProgPct]
++	ld b, a
++	ld a, [wProgRow]
++	add b
++	ld [wProgRow], a
++	push de
++	call ProgressRowAddr
++	pop de
++	ret
++
++ProgressPlaceString:
++; PlaceString for de in the strings bank: copied to wNameBuffer first
++	push hl
++	ld h, d
++	ld l, e
++	ld de, wNameBuffer
++	ld bc, NAME_BUFFER_LENGTH
++	ld a, BANK(ProgStr0)
++	call FarCopyData
++	pop hl
++	ld de, wNameBuffer
++	jp PlaceString
++
++ProgressGetInput:
++; wait for a button, return it in a
++	call DelayFrame
++	call JoypadLowSensitivity
++	ldh a, [hJoyFiltered]
++	and a
++	jr z, ProgressGetInput
++	ret
++
++ProgressCursorAddr:
++; hl = summary cursor position
++	ld a, [wProgCursor]
++	add PROG_FIRST_ROW
++	; fallthrough
++
++ProgressRowAddr:
++; hl = column 1 of row a
++	hlcoord 1, 0
++	ld bc, SCREEN_WIDTH
++	jp AddNTimes
++
++ProgressPrintHud:
++	hlcoord 15, PROG_HUD_ROW
++	ld de, ProgressNoText
++	ld a, [wEventFlags + PROGRESS_HUD_EVENT / 8]
++	bit PROGRESS_HUD_EVENT % 8, a
++	jr z, .print
++	ld de, ProgressYesText
++.print
++	jp PlaceString
++
++ProgressDrawSummary:
++	xor a
++	ldh [hAutoBGTransferEnabled], a
++	call ClearScreen
++	hlcoord 0, 0
++	lb bc, 16, 18
++	call TextBoxBorder
++	hlcoord 1, 1
++	ld de, ProgressTitleText
++	call PlaceString
++	hlcoord 2, 16
++	ld de, ProgressHintText
++	call PlaceString
++	hlcoord 2, PROG_HUD_ROW
++	ld de, ProgressHudText
++	call PlaceString
++	call ProgressPrintHud
++	ld a, 2
++	ld c, 1
++	call ProgressDrawNext
++	xor a
++	ld hl, wProgSumDone
++	ld [hli], a
++	ld [hli], a
++	ld [hli], a ; wProgSumTotal
++	ld [hl], a
++	ld [wProgCat], a
++.catLoop
++	ld a, [wProgCat]
++	call ProgressCount
++	ld hl, wProgSumDone
++	ld a, [wProgDone]
++	add [hl]
++	ld [hli], a
++	ld a, [wProgDone + 1]
++	adc [hl]
++	ld [hli], a
++	ld a, [wProgTotal] ; hl = wProgSumTotal
++	add [hl]
++	ld [hli], a
++	ld a, [wProgTotal + 1]
++	adc [hl]
++	ld [hl], a
++	ld a, [wProgCat]
++	call ProgressGetCategory
++	push de
++	ld a, [wProgCat]
++	add PROG_FIRST_ROW
++	call ProgressRowAddr
++	inc hl
++	pop de
++	push hl
++	call PlaceString
++	pop hl
++	ld bc, 9
++	add hl, bc
++	call ProgressPrintDoneTotal
++	ld a, [wProgCat]
++	inc a
++	ld [wProgCat], a
++	cp NUM_PROGRESS_CATEGORIES
++	jr c, .catLoop
++; overall percentage
++	ld a, [wProgSumDone]
++	ld l, a
++	ld a, [wProgSumDone + 1]
++	ld h, a
++	ld a, [wProgSumTotal]
++	ld e, a
++	ld a, [wProgSumTotal + 1]
++	ld d, a
++	call ProgressPercentHLDE
++	hlcoord 14, 1
++	call ProgressPrintPct
++	call ProgressCursorAddr
++	ld [hl], '▶'
++	ld a, 1
++	ldh [hAutoBGTransferEnabled], a
++	jp Delay3
++
++ProgressList:
++	xor a
++	ld [wProgScroll], a
++	ld [wProgScroll + 1], a
++.redraw
++	call ProgressDrawList
++.loop
++	call ProgressGetInput
++	bit B_PAD_B, a
++	jr nz, .exit
++	bit B_PAD_START, a
++	jr nz, .exit
++	ld de, 1
++	bit B_PAD_DOWN, a
++	jr nz, .down
++	bit B_PAD_UP, a
++	jr nz, .up
++	ld de, PROG_PAGE
++	bit B_PAD_RIGHT, a
++	jr nz, .down
++	bit B_PAD_LEFT, a
++	jr z, .loop
++.up
++	call ProgressScrollUp
++	jr c, .loop
++	jr .redraw
++.down
++	call ProgressScrollDown
++	jr c, .loop
++	jr .redraw
++.exit
++	ld a, SFX_PRESS_AB
++	jp PlaySound
++
++ProgressDrawList:
++	xor a
++	ldh [hAutoBGTransferEnabled], a
++	call ClearScreen
++	ld a, [wProgCat]
++	call ProgressGetCategory
++	hlcoord 1, 0
++	call PlaceString
++	ld a, [wProgCat]
++	call ProgressCount
++	ld hl, wProgDone
++	ld a, [wProgTotal]
++	sub [hl]
++	ld [wProgLeft], a
++	inc hl
++	ld a, [wProgTotal + 1]
++	sbc [hl]
++	ld [wProgLeft + 1], a
++	hlcoord 12, 0
++	call ProgressPrintDoneTotal
++	call ProgressPercent
++	ld [wProgPct], a
++	hlcoord 1, 1
++	ld de, ProgressDoneText
++	call PlaceString
++	ld a, [wProgPct]
++	hlcoord 6, 1
++	call ProgressPrintPct
++	hlcoord 11, 1
++	ld de, ProgressLeftText
++	call PlaceString
++	ld a, [wProgPct]
++	ld b, a
++	ld a, 100
++	sub b
++	hlcoord 16, 1
++	call ProgressPrintPct
++	ld a, [wProgScroll]
++	ld e, a
++	ld a, [wProgScroll + 1]
++	ld d, a
++	ld a, [wProgCat]
++	call ProgressFindRemaining
++	jr nc, .entries
++	hlcoord 1, 3
++	ld de, ProgressAllDoneText
++	call PlaceString
++	jr .show
++.entries
++	ld a, PROG_LIST_TOP
++	ld [wProgRow], a
++.entryLoop
++	push hl
++	push bc
++	call ProgressEntryStrings
++	push bc
++	ld a, [wProgRow]
++	call ProgressRowAddr
++	call ProgressPlaceString
++	ld a, [wProgRow]
++	inc a
++	call ProgressRowAddr
++	inc hl
++	pop de
++	call ProgressPlaceString
++	pop bc
++	pop hl
++	ld a, [wProgRow]
++	add 2
++	ld [wProgRow], a
++	call ProgressNextRemaining
++	jr c, .show
++	ld a, [wProgRow]
++	cp PROG_LIST_TOP + PROG_PAGE * 2
++	jr c, .entryLoop
++	ld a, '▼'
++	ldcoord_a 0, 17
++.show
++	ld a, 1
++	ldh [hAutoBGTransferEnabled], a
++	jp Delay3
++
++ProgressMaxScroll:
++; hl = how far the list can scroll (entries left minus one screen, at least 0)
++	ld a, [wProgLeft]
++	ld l, a
++	ld a, [wProgLeft + 1]
++	ld h, a
++	ld de, -PROG_PAGE
++	add hl, de
++	ret c
++	ld hl, 0
++	ret
++
++ProgressScrollDown:
++; scroll down by de entries; carry if nothing changed
++	ld a, [wProgScroll]
++	ld l, a
++	ld a, [wProgScroll + 1]
++	ld h, a
++	add hl, de
++	push hl
++	call ProgressMaxScroll
++	pop de
++	ld a, l
++	sub e
++	ld a, h
++	sbc d
++	jr nc, ProgressSetScroll
++	ld d, h
++	ld e, l
++	; fallthrough
++
++ProgressSetScroll:
++; scroll = de; carry if it was already that
++	ld a, [wProgScroll]
++	cp e
++	jr nz, .set
++	ld a, [wProgScroll + 1]
++	cp d
++	jr nz, .set
++	scf
++	ret
++.set
++	ld a, e
++	ld [wProgScroll], a
++	ld a, d
++	ld [wProgScroll + 1], a
++	and a
++	ret
++
++ProgressScrollUp:
++; scroll up by de entries; carry if nothing changed
++	ld a, [wProgScroll]
++	sub e
++	ld e, a
++	ld a, [wProgScroll + 1]
++	sbc d
++	ld d, a
++	jr nc, ProgressSetScroll
++	ld de, 0
++	jr ProgressSetScroll
++
++ProgressGetCategory:
++; a = category; returns hl = first entry, bc = entry count, de = name
++	ld l, a
++	ld h, 0
++	add hl, hl
++	add hl, hl
++	add hl, hl
++	ld bc, ProgressCategories
++	add hl, bc
++	ld a, [hli]
++	ld e, a
++	ld a, [hli]
++	ld d, a
++	ld a, [hli]
++	ld c, a
++	ld a, [hli]
++	ld b, a
++	ld a, [hli]
++	ld h, [hl]
++	ld l, a
++	push hl
++	ld h, b
++	ld l, c
++	pop bc
++	ret
++
++ProgressGetHeading:
++; de = the heading shown after "NEXT:" for list [wProgNextCat]. hl is kept.
++	push hl
++	ld a, [wProgNextCat]
++	ld l, a
++	ld h, 0
++	add hl, hl
++	add hl, hl
++	add hl, hl
++	ld bc, ProgressCategories + 6
++	add hl, bc
++	ld a, [hli]
++	ld e, a
++	ld d, [hl]
++	pop hl
++	ret
++
++ProgressNextEntry:
++; hl = the entry after hl
++	ld a, [hl]
++	ld bc, 9
++	bit 7, a
++	jr z, .add
++	ld c, 12
++.add
++	add hl, bc
++	ret
++
++ProgressEntryGate:
++; hl = entry; returns d = its gate (milestone), e = its place in travel order. hl is kept.
++	push hl
++	ld a, [hl]
++	ld bc, 3
++	bit 7, a
++	jr z, .one
++	ld c, 6
++.one
++	add hl, bc
++	ld d, [hl]
++	inc hl
++	ld e, [hl]
++	pop hl
++	ret
++
++ProgressEntryStrings:
++; hl = entry; returns de = first line, bc = second line. hl is kept.
++	push hl
++	ld a, [hl]
++	ld bc, 5
++	bit 7, a
++	jr z, .one
++	ld c, 8
++.one
++	add hl, bc
++	ld a, [hli]
++	ld e, a
++	ld a, [hli]
++	ld d, a
++	ld a, [hli]
++	ld c, a
++	ld b, [hl]
++	pop hl
++	ret
++
++ProgressEntryDone:
++; hl = entry or milestone; carry if its checks pass. hl is kept.
++	push hl
++	ld a, [hli]
++	ld b, a
++	ld e, [hl]
++	inc hl
++	ld d, [hl]
++	inc hl
++	push hl
++	push bc
++	and PROG_CHECK_MASK
++	call ProgressCheck
++	pop bc
++	pop hl
++	jr z, .firstFails
++	bit 7, b
++	jr z, .done
++	bit 6, b
++	jr z, .done
++	jr .second
++.firstFails
++	bit 7, b
++	jr z, .notDone
++	bit 6, b
++	jr nz, .notDone
++.second
++	ld a, [hli]
++	and PROG_CHECK_MASK
++	ld e, [hl]
++	inc hl
++	ld d, [hl]
++	call ProgressCheck
++	jr z, .notDone
++.done
++	pop hl
++	scf
++	ret
++.notDone
++	pop hl
++	and a
++	ret
++
++ProgressCheck:
++; a = check kind (with PROG_INVERT), de = argument; nz if it passes. hl is kept.
++	bit 5, a
++	jr nz, .inverted
++	and PROG_KIND_MASK
++	jr ProgressTestKind
++.inverted
++	and PROG_KIND_MASK
++	call ProgressTestKind
++	jr z, .pass
++	xor a
++	ret
++.pass
++	or 1
++	ret
++
++ProgressTestKind:
++; a = kind, de = argument; nz if it passes. hl is kept.
++	cp PROG_MILESTONE
++	jr z, .milestone
++	cp PROG_ALWAYS
++	jr z, .always
++	cp PROG_OWNCOUNT
++	jr z, .owncount
++	push hl
++	add a
++	ld c, a
++	ld b, 0
++	ld hl, ProgressKindBases
++	add hl, bc
++	ld a, [hli]
++	ld h, [hl]
++	ld l, a
++	ld a, e
++	and 7
++	ld c, a
++	srl d
++	rr e
++	srl d
++	rr e
++	srl d
++	rr e
++	add hl, de
++	ld a, [hl]
++	inc c
++.shift
++	dec c
++	jr z, .test
++	rrca
++	jr .shift
++.test
++	and 1
++	pop hl
++	ret
++.always
++	or 1
++	ret
++.milestone
++	ld a, e
++	jr ProgressMilestoneDone
++.owncount
++	push hl
++	push de
++	ld hl, wPokedexOwned
++	ld b, wPokedexOwnedEnd - wPokedexOwned
++	call CountSetBits
++	pop de
++	pop hl
++	ld a, [wNumSetBits]
++	cp e
++	jr c, .fail
++	or 1
++	ret
++.fail
++	xor a
++	ret
++
++ProgressMilestoneDone:
++; a = milestone; nz if it has happened. hl is kept.
++	push hl
++	ld l, a
++	ld h, 0
++	ld b, h
++	ld c, l
++	add hl, hl
++	add hl, bc
++	add hl, hl ; x6
++	ld bc, ProgressMilestones
++	add hl, bc
++	call ProgressEntryDone
++	pop hl
++	jr c, .yes
++	xor a
++	ret
++.yes
++	or 1
++	ret
++
++ProgressKindBases:
++	dw wEventFlags                ; PROG_EVENT
++	dw wToggleableObjectFlags     ; PROG_TOGGLE
++	dw wObtainedHiddenItemsFlags  ; PROG_HIDDEN
++	dw wCompletedInGameTradeFlags ; PROG_TRADE
++	dw wPokedexOwned              ; PROG_DEX
++	dw wStatusFlags1              ; PROG_FLAGS1
++	dw wStatusFlags4              ; PROG_FLAGS4
++	dw wObtainedHiddenCoinsFlags  ; PROG_HIDDENCOIN
++	dw wSSAnne2FCurScript         ; PROG_SSANNE2F (SCRIPT_SSANNE2F_NOOP is 4)
++	dw wTownVisitedFlag           ; PROG_TOWN
++
++ProgressFindNext:
++; hl = the next thing to do: of everything not done whose gate has happened, the one with the
++; earliest gate, then the earliest place. [wProgNextCat] = its list. Carry if nothing is left.
++	ld a, $ff
++	ld [wProgBestGate], a
++	ld [wProgBestOrder], a
++	xor a
++	ld [wProgBestPtr + 1], a
++	ld a, 1 ; the story list goes last, so a step and an item at the same place show the item first
++.catLoop
++	ld [wProgScanCat], a
++	call ProgressGetCategory
++.entryLoop
++	ld a, b
++	or c
++	jr z, .nextCat
++	push bc
++	call ProgressEntryDone
++	jr c, .next
++	call ProgressEntryGate
++	ld a, [wProgBestGate]
++	cp d
++	jr c, .next
++	jr nz, .candidate
++	ld a, [wProgBestOrder]
++	cp e
++	jr c, .next
++	jr z, .next
++.candidate
++	push de
++	ld a, d
++	call ProgressMilestoneDone
++	pop de
++	jr z, .next
++	ld a, d
++	ld [wProgBestGate], a
++	ld a, e
++	ld [wProgBestOrder], a
++	ld a, l
++	ld [wProgBestPtr], a
++	ld a, h
++	ld [wProgBestPtr + 1], a
++	ld a, [wProgScanCat]
++	ld [wProgNextCat], a
++.next
++	call ProgressNextEntry
++	pop bc
++	dec bc
++	jr .entryLoop
++.nextCat
++	ld a, [wProgScanCat]
++	and a
++	jr z, .done
++	inc a
++	cp NUM_PROGRESS_CATEGORIES
++	jr c, .catLoop
++	xor a
++	jr .catLoop
++.done
++	ld a, [wProgBestPtr]
++	ld l, a
++	ld a, [wProgBestPtr + 1]
++	ld h, a
++	and a
++	scf
++	ret z
++	and a
++	ret
++
++ProgressCount:
++; a = category; wProgDone and wProgTotal = its done and total counts
++	call ProgressGetCategory
++	ld a, c
++	ld [wProgTotal], a
++	ld a, b
++	ld [wProgTotal + 1], a
++	xor a
++	ld [wProgDone], a
++	ld [wProgDone + 1], a
++.loop
++	ld a, b
++	or c
++	ret z
++	push bc
++	call ProgressEntryDone
++	jr nc, .next
++	ld a, [wProgDone]
++	add 1
++	ld [wProgDone], a
++	ld a, [wProgDone + 1]
++	adc 0
++	ld [wProgDone + 1], a
++.next
++	call ProgressNextEntry
++	pop bc
++	dec bc
++	jr .loop
++
++ProgressFindRemaining:
++; a = category, de = how many not-done entries to skip
++; returns hl = entry, bc = entries from it to the end of the list; carry if none
++	push de
++	call ProgressGetCategory
++	pop de
++.loop
++	ld a, b
++	or c
++	jr z, .none
++	push bc
++	push de
++	call ProgressEntryDone
++	pop de
++	pop bc
++	jr c, .skip
++	ld a, d
++	or e
++	ret z ; or clears carry
++	dec de
++.skip
++	push bc
++	call ProgressNextEntry
++	pop bc
++	dec bc
++	jr .loop
++.none
++	scf
++	ret
++
++ProgressNextRemaining:
++; hl = entry, bc = entries from it to the end; moves to the next not-done entry, carry if none
++.advance
++	push bc
++	call ProgressNextEntry
++	pop bc
++	dec bc
++	ld a, b
++	or c
++	jr z, .none
++	push bc
++	call ProgressEntryDone
++	pop bc
++	jr c, .advance
++	ret
++.none
++	scf
++	ret
++
++ProgressPercent:
++; a = wProgDone * 100 / wProgTotal
++	ld a, [wProgDone]
++	ld l, a
++	ld a, [wProgDone + 1]
++	ld h, a
++	ld a, [wProgTotal]
++	ld e, a
++	ld a, [wProgTotal + 1]
++	ld d, a
++	; fallthrough
++
++ProgressPercentHLDE:
++; a = hl * 100 / de, rounded down
++	ld a, d
++	or e
++	jr nz, .scale
++	ld a, 100
++	ret
++.scale
++; keep hl * 100 inside 16 bits
++	ld a, d
++	cp HIGH(656)
++	jr c, .ok
++	jr nz, .halve
++	ld a, e
++	cp LOW(656)
++	jr c, .ok
++.halve
++	srl d
++	rr e
++	srl h
++	rr l
++	jr .scale
++.ok
++	push de
++	add hl, hl
++	add hl, hl
++	push hl ; x4
++	add hl, hl
++	add hl, hl
++	add hl, hl
++	ld b, h
++	ld c, l ; x32
++	add hl, hl ; x64
++	add hl, bc ; x96
++	pop bc
++	add hl, bc ; x100
++	pop de
++	ld b, 0
++.div
++	ld a, l
++	sub e
++	ld l, a
++	ld a, h
++	sbc d
++	ld h, a
++	jr c, .done
++	inc b
++	jr .div
++.done
++	ld a, b
++	ret
++
++ProgressPrintDoneTotal:
++; at hl: done (3 digits), "/", total (3 digits)
++	push hl
++	ld a, [wProgDone + 1]
++	ld [wProgPrint], a
++	ld a, [wProgDone]
++	ld [wProgPrint + 1], a
++	ld de, wProgPrint
++	lb bc, 2, 3
++	call PrintNumber
++	ld [hl], '/'
++	inc hl
++	ld a, [wProgTotal + 1]
++	ld [wProgPrint], a
++	ld a, [wProgTotal]
++	ld [wProgPrint + 1], a
++	ld de, wProgPrint
++	lb bc, 2, 3
++	call PrintNumber
++	pop hl
++	ret
++
++ProgressPrintPct:
++; at hl: a as 3 digits, then "%"
++	ld [wProgPrint], a
++	ld de, wProgPrint
++	lb bc, 1, 3
++	call PrintNumber
++	ld [hl], PROG_PERCENT
++	ret
++
++ProgressTitleText:   db "PROGRESS@"
++ProgressNextText:    db "NEXT:@"
++ProgressHintText:    db "A:OPEN  B:BACK@"
++ProgressHudText:     db "IN-GAME HUD@"
++ProgressYesText:     db "YES@"
++ProgressNoText:      db "NO @"
++ProgressDoneText:    db "Done@"
++ProgressLeftText:    db "Left@"
++ProgressAllDoneText: db "All done!@"
++ProgressWarningText: db "WARNING!@"
++ProgressNotDoneText: db "Not done yet:@"
++
++ProgressPercentGlyph:
++	db %00000000
++	db %01100010
++	db %01100100
++	db %00001000
++	db %00010000
++	db %00100110
++	db %01000110
++	db %00000000
++
++	ASSERT PROG_HUD_ROW == PROG_FIRST_ROW + NUM_PROGRESS_CATEGORIES
++
++INCLUDE "engine/menus/progress_data.asm"
+diff --git a/engine/menus/progress_data.asm b/engine/menus/progress_data.asm
+new file mode 100644
+index 0000000..7bcecab
+--- /dev/null
++++ b/engine/menus/progress_data.asm
+@@ -0,0 +1,4500 @@
++; Generated by gen_progress.py from the disassembly. Do not edit by hand.
++
++DEF NUM_PROGRESS_CATEGORIES EQU 9
++DEF NUM_PROGRESS_MILESTONES EQU 151
++
++ProgressCategories:
++	dw ProgCatName0, ProgCatEntries0, 33, ProgCatHeading0
++	dw ProgCatName1, ProgCatEntries1, 151, ProgCatHeading1
++	dw ProgCatName2, ProgCatEntries2, 105, ProgCatHeading2
++	dw ProgCatName3, ProgCatEntries3, 64, ProgCatHeading3
++	dw ProgCatName4, ProgCatEntries4, 41, ProgCatHeading4
++	dw ProgCatName5, ProgCatEntries5, 319, ProgCatHeading5
++	dw ProgCatName6, ProgCatEntries6, 9, ProgCatHeading6
++	dw ProgCatName7, ProgCatEntries7, 20, ProgCatHeading7
++	dw ProgCatName8, ProgCatEntries8, 11, ProgCatHeading8
++
++ProgCatName0: db "STORY@"
++ProgCatHeading0: db "STORY@"
++ProgCatName1: db "POKéDEX@"
++ProgCatHeading1: db "POKéDEX@"
++ProgCatName2: db "ITEMS@"
++ProgCatHeading2: db "ITEM@"
++ProgCatName3: db "HIDDEN@"
++ProgCatHeading3: db "HIDDEN ITEM@"
++ProgCatName4: db "GIFTS@"
++ProgCatHeading4: db "GIFT@"
++ProgCatName5: db "TRAINERS@"
++ProgCatHeading5: db "TRAINER@"
++ProgCatName6: db "TRADES@"
++ProgCatHeading6: db "TRADE@"
++ProgCatName7: db "SPECIAL@"
++ProgCatHeading7: db "SPECIAL@"
++ProgCatName8: db "TOWNS@"
++ProgCatHeading8: db "TOWN@"
++
++ProgressMilestones:
++; 6 bytes each: first check, then a second check (unused unless the first has PROG_EITHER/BOTH)
++; 0 ALWAYS
++	db PROG_ALWAYS
++	dw 0
++	db 0
++	dw 0
++; 1 NOT_ARTICUNO
++	db PROG_EVENT | PROG_INVERT
++	dw EVENT_BEAT_ARTICUNO
++	db 0
++	dw 0
++; 2 NOT_MEWTWO
++	db PROG_EVENT | PROG_INVERT
++	dw EVENT_BEAT_MEWTWO
++	db 0
++	dw 0
++; 3 NOT_MOLTRES
++	db PROG_EVENT | PROG_INVERT
++	dw EVENT_BEAT_MOLTRES
++	db 0
++	dw 0
++; 4 NOT_ZAPDOS
++	db PROG_EVENT | PROG_INVERT
++	dw EVENT_BEAT_ZAPDOS
++	db 0
++	dw 0
++; 5 SNORLAXLEFT
++	db PROG_EVENT | PROG_INVERT | PROG_EITHER
++	dw EVENT_BEAT_ROUTE12_SNORLAX
++	db PROG_EVENT | PROG_INVERT
++	dw EVENT_BEAT_ROUTE16_SNORLAX
++; 6 W_ARTICUNO
++	db PROG_EVENT | PROG_INVERT | PROG_BOTH
++	dw EVENT_BEAT_ARTICUNO
++	db PROG_DEX | PROG_INVERT
++	dw 143
++; 7 W_DOJO
++	db PROG_EVENT | PROG_INVERT | PROG_BOTH
++	dw EVENT_GOT_HITMONLEE
++	db PROG_EVENT | PROG_INVERT
++	dw EVENT_GOT_HITMONCHAN
++; 8 W_FOSSIL
++	db PROG_EVENT | PROG_INVERT | PROG_BOTH
++	dw EVENT_GOT_DOME_FOSSIL
++	db PROG_EVENT | PROG_INVERT
++	dw EVENT_GOT_HELIX_FOSSIL
++; 9 W_MEWTWO
++	db PROG_EVENT | PROG_INVERT | PROG_BOTH
++	dw EVENT_BEAT_MEWTWO
++	db PROG_DEX | PROG_INVERT
++	dw 149
++; 10 W_MOLTRES
++	db PROG_EVENT | PROG_INVERT | PROG_BOTH
++	dw EVENT_BEAT_MOLTRES
++	db PROG_DEX | PROG_INVERT
++	dw 145
++; 11 W_NOHM01
++	db PROG_EVENT | PROG_INVERT
++	dw EVENT_GOT_HM01
++	db 0
++	dw 0
++; 12 W_R22
++	db PROG_EVENT | PROG_BOTH
++	dw EVENT_1ST_ROUTE22_RIVAL_BATTLE
++	db PROG_EVENT | PROG_INVERT
++	dw EVENT_BEAT_BROCK
++; 13 W_SILPH
++	db PROG_EVENT | PROG_INVERT
++	dw EVENT_BEAT_SILPH_CO_GIOVANNI
++	db 0
++	dw 0
++; 14 W_SNORLAX12
++	db PROG_MILESTONE | PROG_BOTH
++	dw 73
++	db PROG_MILESTONE
++	dw 15
++; 15 W_SNORLAX12_X
++	db PROG_EVENT | PROG_INVERT | PROG_BOTH
++	dw EVENT_BEAT_ROUTE12_SNORLAX
++	db PROG_DEX | PROG_INVERT
++	dw 142
++; 16 W_SNORLAX16
++	db PROG_MILESTONE | PROG_BOTH
++	dw 73
++	db PROG_MILESTONE
++	dw 17
++; 17 W_SNORLAX16_X
++	db PROG_EVENT | PROG_INVERT | PROG_BOTH
++	dw EVENT_BEAT_ROUTE16_SNORLAX
++	db PROG_DEX | PROG_INVERT
++	dw 142
++; 18 W_SSLEAVING
++	db PROG_EVENT | PROG_BOTH
++	dw EVENT_GOT_HM01
++	db PROG_EVENT | PROG_INVERT
++	dw EVENT_SS_ANNE_LEFT
++; 19 W_STARTER
++	db PROG_EVENT | PROG_BOTH
++	dw EVENT_OAK_ASKED_TO_CHOOSE_MON
++	db PROG_EVENT | PROG_INVERT
++	dw EVENT_GOT_STARTER
++; 20 W_ZAPDOS
++	db PROG_EVENT | PROG_INVERT | PROG_BOTH
++	dw EVENT_BEAT_ZAPDOS
++	db PROG_DEX | PROG_INVERT
++	dw 144
++; 21 S_STARTER
++	db PROG_EVENT
++	dw EVENT_GOT_STARTER
++	db 0
++	dw 0
++; 22 S_PARCEL
++	db PROG_EVENT
++	dw EVENT_GOT_OAKS_PARCEL
++	db 0
++	dw 0
++; 23 R22RIVAL1
++	db PROG_EVENT
++	dw EVENT_1ST_ROUTE22_RIVAL_BATTLE
++	db 0
++	dw 0
++; 24 R22BEATEN
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE22_RIVAL_1ST_BATTLE
++	db 0
++	dw 0
++; 25 S_DEX
++	db PROG_EVENT
++	dw EVENT_GOT_POKEDEX
++	db 0
++	dw 0
++; 26 DEX_NIDORAN_M
++	db PROG_DEX
++	dw 31
++	db 0
++	dw 0
++; 27 DEX_PIKACHU
++	db PROG_DEX
++	dw 24
++	db 0
++	dw 0
++; 28 DEX_SPEAROW
++	db PROG_DEX
++	dw 20
++	db 0
++	dw 0
++; 29 S_BROCK
++	db PROG_EVENT
++	dw EVENT_BEAT_BROCK
++	db 0
++	dw 0
++; 30 DEX_CLEFAIRY
++	db PROG_DEX
++	dw 34
++	db 0
++	dw 0
++; 31 DEX_JIGGLYPUFF
++	db PROG_DEX
++	dw 38
++	db 0
++	dw 0
++; 32 OWN10
++	db PROG_OWNCOUNT
++	dw 10
++	db 0
++	dw 0
++; 33 S_MTMOON
++	db PROG_EVENT
++	dw EVENT_BEAT_MT_MOON_EXIT_SUPER_NERD
++	db 0
++	dw 0
++; 34 (DEX_NIDORAN_M+S_MTMOON)
++	db PROG_DEX | PROG_BOTH
++	dw 31
++	db PROG_EVENT
++	dw EVENT_BEAT_MT_MOON_EXIT_SUPER_NERD
++; 35 (DEX_SPEAROW+S_MTMOON)
++	db PROG_DEX | PROG_BOTH
++	dw 20
++	db PROG_EVENT
++	dw EVENT_BEAT_MT_MOON_EXIT_SUPER_NERD
++; 36 FOSSIL
++	db PROG_EVENT | PROG_EITHER
++	dw EVENT_GOT_DOME_FOSSIL
++	db PROG_EVENT
++	dw EVENT_GOT_HELIX_FOSSIL
++; 37 OLDROD
++	db PROG_FLAGS1
++	dw BIT_GOT_OLD_ROD
++	db 0
++	dw 0
++; 38 VOUCHER
++	db PROG_EVENT
++	dw EVENT_GOT_BIKE_VOUCHER
++	db 0
++	dw 0
++; 39 S_RIVAL1
++	db PROG_EVENT
++	dw EVENT_BEAT_CERULEAN_RIVAL
++	db 0
++	dw 0
++; 40 DEX_ABRA
++	db PROG_DEX
++	dw 62
++	db 0
++	dw 0
++; 41 S_MISTY
++	db PROG_EVENT
++	dw EVENT_BEAT_MISTY
++	db 0
++	dw 0
++; 42 SSANNE
++	db PROG_EVENT | PROG_BOTH
++	dw EVENT_GOT_SS_TICKET
++	db PROG_EVENT | PROG_INVERT
++	dw EVENT_SS_ANNE_LEFT
++; 43 S_TICKET
++	db PROG_EVENT
++	dw EVENT_GOT_SS_TICKET
++	db 0
++	dw 0
++; 44 S_HM01
++	db PROG_EVENT
++	dw EVENT_GOT_HM01
++	db 0
++	dw 0
++; 45 CUT
++	db PROG_EVENT | PROG_BOTH
++	dw EVENT_GOT_HM01
++	db PROG_EVENT
++	dw EVENT_BEAT_MISTY
++; 46 DEX_GROWLITHE
++	db PROG_DEX
++	dw 57
++	db 0
++	dw 0
++; 47 (DEX_PIKACHU+CUT)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 27
++	db PROG_MILESTONE
++	dw 45
++; 48 (OWN10+CUT)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 32
++	db PROG_MILESTONE
++	dw 45
++; 49 (CUT+DEX_GROWLITHE)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 45
++	db PROG_MILESTONE
++	dw 46
++; 50 DEX_RAICHU
++	db PROG_DEX
++	dw 25
++	db 0
++	dw 0
++; 51 BIKE
++	db PROG_EVENT
++	dw EVENT_GOT_BICYCLE
++	db 0
++	dw 0
++; 52 OLDAMBER
++	db PROG_EVENT
++	dw EVENT_GOT_OLD_AMBER
++	db 0
++	dw 0
++; 53 COINCASE
++	db PROG_EVENT
++	dw EVENT_GOT_COIN_CASE
++	db 0
++	dw 0
++; 54 DEX_NIDORINA
++	db PROG_DEX
++	dw 29
++	db 0
++	dw 0
++; 55 (CUT+COINCASE)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 45
++	db PROG_MILESTONE
++	dw 53
++; 56 ITEMFINDER
++	db PROG_EVENT
++	dw EVENT_GOT_ITEMFINDER
++	db 0
++	dw 0
++; 57 OWN30
++	db PROG_OWNCOUNT
++	dw 30
++	db 0
++	dw 0
++; 58 (CUT+ITEMFINDER)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 45
++	db PROG_MILESTONE
++	dw 56
++; 59 (SSANNE+ITEMFINDER)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 42
++	db PROG_MILESTONE
++	dw 56
++; 60 (S_MTMOON+OWN30)
++	db PROG_EVENT | PROG_BOTH
++	dw EVENT_BEAT_MT_MOON_EXIT_SUPER_NERD
++	db PROG_OWNCOUNT
++	dw 30
++; 61 (S_RIVAL1+ITEMFINDER)
++	db PROG_EVENT | PROG_BOTH
++	dw EVENT_BEAT_CERULEAN_RIVAL
++	db PROG_EVENT
++	dw EVENT_GOT_ITEMFINDER
++; 62 S_SURGE
++	db PROG_EVENT
++	dw EVENT_BEAT_LT_SURGE
++	db 0
++	dw 0
++; 63 S_THIEF
++	db PROG_EVENT
++	dw EVENT_BEAT_CERULEAN_ROCKET_THIEF
++	db 0
++	dw 0
++; 64 SHOWN_TOGGLE_ROCKET_HIDEOUT_B4F_ITEM_5
++	db PROG_EVENT
++	dw EVENT_ROCKET_DROPPED_LIFT_KEY
++	db 0
++	dw 0
++; 65 (CUT+SHOWN_TOGGLE_ROCKET_HIDEOUT_B4F_ITEM_5)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 45
++	db PROG_MILESTONE
++	dw 64
++; 66 S_ERIKA
++	db PROG_EVENT
++	dw EVENT_BEAT_ERIKA
++	db 0
++	dw 0
++; 67 SHOWN_TOGGLE_ROCKET_HIDEOUT_B4F_ITEM_4
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCKET_HIDEOUT_GIOVANNI
++	db 0
++	dw 0
++; 68 (CUT+SHOWN_TOGGLE_ROCKET_HIDEOUT_B4F_ITEM_4)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 45
++	db PROG_MILESTONE
++	dw 67
++; 69 S_HIDEOUT
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCKET_HIDEOUT_GIOVANNI
++	db 0
++	dw 0
++; 70 S_RIVAL2
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMON_TOWER_RIVAL
++	db 0
++	dw 0
++; 71 S_GHOST
++	db PROG_EVENT
++	dw EVENT_BEAT_GHOST_MAROWAK
++	db 0
++	dw 0
++; 72 S_FUJI
++	db PROG_EVENT
++	dw EVENT_RESCUED_MR_FUJI
++	db 0
++	dw 0
++; 73 S_FLUTE
++	db PROG_EVENT
++	dw EVENT_GOT_POKE_FLUTE
++	db 0
++	dw 0
++; 74 DEX_EXEGGCUTE
++	db PROG_DEX
++	dw 101
++	db 0
++	dw 0
++; 75 DEX_GLOOM
++	db PROG_DEX
++	dw 43
++	db 0
++	dw 0
++; 76 DEX_NIDORINO
++	db PROG_DEX
++	dw 32
++	db 0
++	dw 0
++; 77 DEX_VENONAT
++	db PROG_DEX
++	dw 47
++	db 0
++	dw 0
++; 78 (ITEMFINDER+S_FLUTE)
++	db PROG_EVENT | PROG_BOTH
++	dw EVENT_GOT_ITEMFINDER
++	db PROG_EVENT
++	dw EVENT_GOT_POKE_FLUTE
++; 79 (SNORLAXLEFT+S_FLUTE)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 5
++	db PROG_MILESTONE
++	dw 73
++; 80 CYCLING
++	db PROG_MILESTONE | PROG_BOTH
++	dw 73
++	db PROG_MILESTONE
++	dw 51
++; 81 (CUT+DEX_EXEGGCUTE)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 45
++	db PROG_MILESTONE
++	dw 74
++; 82 (CUT+DEX_GLOOM)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 45
++	db PROG_MILESTONE
++	dw 75
++; 83 ((ITEMFINDER+S_FLUTE)+CYCLING)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 78
++	db PROG_MILESTONE
++	dw 80
++; 84 (ITEMFINDER+CYCLING)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 56
++	db PROG_MILESTONE
++	dw 80
++; 85 (S_DEX+CYCLING)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 25
++	db PROG_MILESTONE
++	dw 80
++; 86 (S_FLUTE+CYCLING)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 73
++	db PROG_MILESTONE
++	dw 80
++; 87 S_SNORLAX
++	db PROG_EVENT | PROG_EITHER
++	dw EVENT_BEAT_ROUTE12_SNORLAX
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE16_SNORLAX
++; 88 GOODROD
++	db PROG_FLAGS1
++	dw BIT_GOT_GOOD_ROD
++	db 0
++	dw 0
++; 89 SUPERROD
++	db PROG_FLAGS1
++	dw BIT_GOT_SUPER_ROD
++	db 0
++	dw 0
++; 90 DEX_SHELLDER
++	db PROG_DEX
++	dw 89
++	db 0
++	dw 0
++; 91 (CUT+SUPERROD)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 45
++	db PROG_MILESTONE
++	dw 89
++; 92 (CYCLING+SUPERROD)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 80
++	db PROG_MILESTONE
++	dw 89
++; 93 (CUT+DEX_SHELLDER)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 45
++	db PROG_MILESTONE
++	dw 90
++; 94 DEX_POLIWHIRL
++	db PROG_DEX
++	dw 60
++	db 0
++	dw 0
++; 95 OWN50
++	db PROG_OWNCOUNT
++	dw 50
++	db 0
++	dw 0
++; 96 (CUT+DEX_POLIWHIRL)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 45
++	db PROG_MILESTONE
++	dw 94
++; 97 (S_FLUTE+OWN50)
++	db PROG_EVENT | PROG_BOTH
++	dw EVENT_GOT_POKE_FLUTE
++	db PROG_OWNCOUNT
++	dw 50
++; 98 S_KOGA
++	db PROG_EVENT
++	dw EVENT_BEAT_KOGA
++	db 0
++	dw 0
++; 99 S_HM03
++	db PROG_EVENT
++	dw EVENT_GOT_HM03
++	db 0
++	dw 0
++; 100 SURF
++	db PROG_EVENT | PROG_BOTH
++	dw EVENT_GOT_HM03
++	db PROG_EVENT
++	dw EVENT_BEAT_KOGA
++; 101 DEX_PONYTA
++	db PROG_DEX
++	dw 76
++	db 0
++	dw 0
++; 102 (CUT+SURF)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 45
++	db PROG_MILESTONE
++	dw 100
++; 103 (DEX_RAICHU+SURF)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 50
++	db PROG_MILESTONE
++	dw 100
++; 104 (DEX_VENONAT+SURF)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 77
++	db PROG_MILESTONE
++	dw 100
++; 105 (FOSSIL+SURF)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 36
++	db PROG_MILESTONE
++	dw 100
++; 106 (ITEMFINDER+SURF)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 56
++	db PROG_MILESTONE
++	dw 100
++; 107 (NOT_ARTICUNO+SURF)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 1
++	db PROG_MILESTONE
++	dw 100
++; 108 (NOT_ZAPDOS+SURF)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 4
++	db PROG_MILESTONE
++	dw 100
++; 109 (OLDAMBER+SURF)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 52
++	db PROG_MILESTONE
++	dw 100
++; 110 (SUPERROD+SURF)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 89
++	db PROG_MILESTONE
++	dw 100
++; 111 (SURF+DEX_PONYTA)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 100
++	db PROG_MILESTONE
++	dw 101
++; 112 DEX_STARYU
++	db PROG_DEX
++	dw 119
++	db 0
++	dw 0
++; 113 (CUT+DEX_STARYU)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 45
++	db PROG_MILESTONE
++	dw 112
++; 114 S_HM04
++	db PROG_EVENT
++	dw EVENT_GOT_HM04
++	db 0
++	dw 0
++; 115 STRENGTH
++	db PROG_EVENT | PROG_BOTH
++	dw EVENT_GOT_HM04
++	db PROG_EVENT
++	dw EVENT_BEAT_ERIKA
++; 116 ((ITEMFINDER+SURF)+STRENGTH)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 106
++	db PROG_MILESTONE
++	dw 115
++; 117 ((NOT_ARTICUNO+SURF)+STRENGTH)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 107
++	db PROG_MILESTONE
++	dw 115
++; 118 ((SUPERROD+SURF)+STRENGTH)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 110
++	db PROG_MILESTONE
++	dw 115
++; 119 (ITEMFINDER+STRENGTH)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 56
++	db PROG_MILESTONE
++	dw 115
++; 120 (NOT_MOLTRES+STRENGTH)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 3
++	db PROG_MILESTONE
++	dw 115
++; 121 (SURF+STRENGTH)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 100
++	db PROG_MILESTONE
++	dw 115
++; 122 DEX_SLOWBRO
++	db PROG_DEX
++	dw 79
++	db 0
++	dw 0
++; 123 (CYCLING+DEX_SLOWBRO)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 80
++	db PROG_MILESTONE
++	dw 122
++; 124 S_DRINK
++	db PROG_FLAGS1
++	dw BIT_GAVE_SAFFRON_GUARDS_DRINK
++	db 0
++	dw 0
++; 125 (ITEMFINDER+S_DRINK)
++	db PROG_EVENT | PROG_BOTH
++	dw EVENT_GOT_ITEMFINDER
++	db PROG_FLAGS1
++	dw BIT_GAVE_SAFFRON_GUARDS_DRINK
++; 126 SILPHTRAINERS
++	db PROG_FLAGS1 | PROG_BOTH
++	dw BIT_GAVE_SAFFRON_GUARDS_DRINK
++	db PROG_EVENT | PROG_INVERT
++	dw EVENT_BEAT_SILPH_CO_GIOVANNI
++; 127 S_RIVAL3
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_RIVAL
++	db 0
++	dw 0
++; 128 S_SILPH
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_GIOVANNI
++	db 0
++	dw 0
++; 129 S_SABRINA
++	db PROG_EVENT
++	dw EVENT_BEAT_SABRINA
++	db 0
++	dw 0
++; 130 SECRETKEY
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_MANSION_B1F_ITEM_5
++	db 0
++	dw 0
++; 131 (S_SABRINA+SECRETKEY)
++	db PROG_EVENT | PROG_BOTH
++	dw EVENT_BEAT_SABRINA
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_MANSION_B1F_ITEM_5
++; 132 S_BLAINE
++	db PROG_EVENT
++	dw EVENT_BEAT_BLAINE
++	db 0
++	dw 0
++; 133 (SECRETKEY+S_BLAINE)
++	db PROG_TOGGLE | PROG_BOTH
++	dw TOGGLE_POKEMON_MANSION_B1F_ITEM_5
++	db PROG_EVENT
++	dw EVENT_BEAT_BLAINE
++; 134 S_GIOVANNI
++	db PROG_EVENT
++	dw EVENT_BEAT_VIRIDIAN_GYM_GIOVANNI
++	db 0
++	dw 0
++; 135 ((ITEMFINDER+STRENGTH)+S_GIOVANNI)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 119
++	db PROG_MILESTONE
++	dw 134
++; 136 ((NOT_MOLTRES+STRENGTH)+S_GIOVANNI)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 120
++	db PROG_MILESTONE
++	dw 134
++; 137 (STRENGTH+S_GIOVANNI)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 115
++	db PROG_MILESTONE
++	dw 134
++; 138 (SUPERROD+S_GIOVANNI)
++	db PROG_FLAGS1 | PROG_BOTH
++	dw BIT_GOT_SUPER_ROD
++	db PROG_EVENT
++	dw EVENT_BEAT_VIRIDIAN_GYM_GIOVANNI
++; 139 S_RIVAL4
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE22_RIVAL_2ND_BATTLE
++	db 0
++	dw 0
++; 140 (STRENGTH+S_RIVAL4)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 115
++	db PROG_MILESTONE
++	dw 139
++; 141 S_LORELEI
++	db PROG_EVENT
++	dw EVENT_BEAT_LORELEIS_ROOM_TRAINER_0
++	db 0
++	dw 0
++; 142 S_BRUNO
++	db PROG_EVENT
++	dw EVENT_BEAT_BRUNOS_ROOM_TRAINER_0
++	db 0
++	dw 0
++; 143 S_AGATHA
++	db PROG_EVENT
++	dw EVENT_BEAT_AGATHAS_ROOM_TRAINER_0
++	db 0
++	dw 0
++; 144 S_LANCE
++	db PROG_EVENT
++	dw EVENT_BEAT_LANCE
++	db 0
++	dw 0
++; 145 S_CHAMPION
++	db PROG_EVENT
++	dw EVENT_BEAT_CHAMPION_RIVAL
++	db 0
++	dw 0
++; 146 (ITEMFINDER+S_CHAMPION)
++	db PROG_EVENT | PROG_BOTH
++	dw EVENT_GOT_ITEMFINDER
++	db PROG_EVENT
++	dw EVENT_BEAT_CHAMPION_RIVAL
++; 147 (NOT_MEWTWO+S_CHAMPION)
++	db PROG_EVENT | PROG_INVERT | PROG_BOTH
++	dw EVENT_BEAT_MEWTWO
++	db PROG_EVENT
++	dw EVENT_BEAT_CHAMPION_RIVAL
++; 148 (SUPERROD+S_CHAMPION)
++	db PROG_FLAGS1 | PROG_BOTH
++	dw BIT_GOT_SUPER_ROD
++	db PROG_EVENT
++	dw EVENT_BEAT_CHAMPION_RIVAL
++; 149 OWN150
++	db PROG_OWNCOUNT
++	dw 150
++	db 0
++	dw 0
++; 150 (CUT+OWN150)
++	db PROG_MILESTONE | PROG_BOTH
++	dw 45
++	db PROG_MILESTONE
++	dw 149
++
++ProgCatEntries0:
++	db PROG_EVENT
++	dw EVENT_GOT_STARTER
++	db 0, 4 ; ALWAYS
++	dw ProgStr0, ProgStr1
++	db PROG_EVENT
++	dw EVENT_GOT_OAKS_PARCEL
++	db 21, 6 ; S_STARTER
++	dw ProgStr2, ProgStr3
++	db PROG_EVENT
++	dw EVENT_GOT_POKEDEX
++	db 22, 4 ; S_PARCEL
++	dw ProgStr4, ProgStr1
++	db PROG_EVENT
++	dw EVENT_BEAT_BROCK
++	db 25, 16 ; S_DEX
++	dw ProgStr5, ProgStr6
++	db PROG_EVENT
++	dw EVENT_BEAT_MT_MOON_EXIT_SUPER_NERD
++	db 29, 21 ; S_BROCK
++	dw ProgStr7, ProgStr8
++	db PROG_EVENT
++	dw EVENT_BEAT_CERULEAN_RIVAL
++	db 33, 23 ; S_MTMOON
++	dw ProgStr9, ProgStr10
++	db PROG_EVENT
++	dw EVENT_BEAT_MISTY
++	db 39, 25 ; S_RIVAL1
++	dw ProgStr11, ProgStr12
++	db PROG_EVENT
++	dw EVENT_GOT_SS_TICKET
++	db 41, 28 ; S_MISTY
++	dw ProgStr13, ProgStr14
++	db PROG_EVENT
++	dw EVENT_GOT_HM01
++	db 43, 49 ; S_TICKET
++	dw ProgStr15, ProgStr16
++	db PROG_EVENT
++	dw EVENT_BEAT_LT_SURGE
++	db 45, 50 ; CUT
++	dw ProgStr17, ProgStr18
++	db PROG_EVENT
++	dw EVENT_BEAT_CERULEAN_ROCKET_THIEF
++	db 62, 23 ; S_SURGE
++	dw ProgStr19, ProgStr10
++	db PROG_EVENT
++	dw EVENT_BEAT_ERIKA
++	db 63, 82 ; S_THIEF
++	dw ProgStr20, ProgStr21
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCKET_HIDEOUT_GIOVANNI
++	db 66, 87 ; S_ERIKA
++	dw ProgStr22, ProgStr23
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMON_TOWER_RIVAL
++	db 69, 65 ; S_HIDEOUT
++	dw ProgStr9, ProgStr24
++	db PROG_EVENT
++	dw EVENT_BEAT_GHOST_MAROWAK
++	db 70, 69 ; S_RIVAL2
++	dw ProgStr25, ProgStr26
++	db PROG_EVENT
++	dw EVENT_RESCUED_MR_FUJI
++	db 71, 70 ; S_GHOST
++	dw ProgStr27, ProgStr28
++	db PROG_EVENT
++	dw EVENT_GOT_POKE_FLUTE
++	db 72, 63 ; S_FUJI
++	dw ProgStr29, ProgStr30
++	db PROG_EVENT | PROG_EITHER
++	dw EVENT_BEAT_ROUTE12_SNORLAX
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE16_SNORLAX
++	db 73, 88 ; S_FLUTE
++	dw ProgStr31, ProgStr32
++	db PROG_EVENT
++	dw EVENT_BEAT_KOGA
++	db 87, 102 ; S_SNORLAX
++	dw ProgStr33, ProgStr34
++	db PROG_EVENT
++	dw EVENT_GOT_HM03
++	db 98, 109 ; S_KOGA
++	dw ProgStr35, ProgStr36
++	db PROG_EVENT
++	dw EVENT_GOT_HM04
++	db 99, 103 ; S_HM03
++	dw ProgStr37, ProgStr38
++	db PROG_FLAGS1
++	dw BIT_GAVE_SAFFRON_GUARDS_DRINK
++	db 114, 110 ; S_HM04
++	dw ProgStr39, ProgStr40
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_RIVAL
++	db 124, 120 ; S_DRINK
++	dw ProgStr9, ProgStr41
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_GIOVANNI
++	db 127, 124 ; S_RIVAL3
++	dw ProgStr22, ProgStr42
++	db PROG_EVENT
++	dw EVENT_BEAT_SABRINA
++	db 128, 125 ; S_SILPH
++	dw ProgStr43, ProgStr44
++	db PROG_EVENT
++	dw EVENT_BEAT_BLAINE
++	db 131, 142 ; (S_SABRINA+SECRETKEY)
++	dw ProgStr45, ProgStr46
++	db PROG_EVENT
++	dw EVENT_BEAT_VIRIDIAN_GYM_GIOVANNI
++	db 132, 145 ; S_BLAINE
++	dw ProgStr22, ProgStr47
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE22_RIVAL_2ND_BATTLE
++	db 134, 8 ; S_GIOVANNI
++	dw ProgStr9, ProgStr48
++	db PROG_EVENT
++	dw EVENT_BEAT_LORELEIS_ROOM_TRAINER_0
++	db 140, 153 ; (STRENGTH+S_RIVAL4)
++	dw ProgStr49, ProgStr50
++	db PROG_EVENT
++	dw EVENT_BEAT_BRUNOS_ROOM_TRAINER_0
++	db 141, 154 ; S_LORELEI
++	dw ProgStr51, ProgStr50
++	db PROG_EVENT
++	dw EVENT_BEAT_AGATHAS_ROOM_TRAINER_0
++	db 142, 155 ; S_BRUNO
++	dw ProgStr52, ProgStr50
++	db PROG_EVENT
++	dw EVENT_BEAT_LANCE
++	db 143, 156 ; S_AGATHA
++	dw ProgStr53, ProgStr50
++	db PROG_EVENT
++	dw EVENT_BEAT_CHAMPION_RIVAL
++	db 144, 156 ; S_LANCE
++	dw ProgStr54, ProgStr50
++ProgCatEntries1:
++	db PROG_DEX
++	dw 0
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr55, ProgStr56
++	db PROG_DEX
++	dw 1
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr57, ProgStr58
++	db PROG_DEX
++	dw 2
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr59, ProgStr60
++	db PROG_DEX
++	dw 3
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr61, ProgStr56
++	db PROG_DEX
++	dw 4
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr62, ProgStr63
++	db PROG_DEX
++	dw 5
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr64, ProgStr65
++	db PROG_DEX
++	dw 6
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr66, ProgStr56
++	db PROG_DEX
++	dw 7
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr67, ProgStr68
++	db PROG_DEX
++	dw 8
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr69, ProgStr70
++	db PROG_DEX
++	dw 9
++	db 25, 12 ; S_DEX
++	dw ProgStr71, ProgStr72
++	db PROG_DEX
++	dw 10
++	db 25, 12 ; S_DEX
++	dw ProgStr73, ProgStr72
++	db PROG_DEX
++	dw 11
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr74, ProgStr75
++	db PROG_DEX
++	dw 12
++	db 25, 9 ; S_DEX
++	dw ProgStr76, ProgStr77
++	db PROG_DEX
++	dw 13
++	db 25, 12 ; S_DEX
++	dw ProgStr78, ProgStr72
++	db PROG_DEX
++	dw 14
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr79, ProgStr80
++	db PROG_DEX
++	dw 15
++	db 25, 5 ; S_DEX
++	dw ProgStr81, ProgStr82
++	db PROG_DEX
++	dw 16
++	db 73, 92 ; S_FLUTE
++	dw ProgStr83, ProgStr84
++	db PROG_DEX
++	dw 17
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr85, ProgStr86
++	db PROG_DEX
++	dw 18
++	db 25, 5 ; S_DEX
++	dw ProgStr87, ProgStr82
++	db PROG_DEX
++	dw 19
++	db 73, 95 ; S_FLUTE
++	dw ProgStr88, ProgStr89
++	db PROG_DEX
++	dw 20
++	db 25, 8 ; S_DEX
++	dw ProgStr90, ProgStr48
++	db PROG_DEX
++	dw 21
++	db 85, 97 ; (S_DEX+CYCLING)
++	dw ProgStr91, ProgStr92
++	db PROG_DEX
++	dw 22
++	db 33, 22 ; S_MTMOON
++	dw ProgStr93, ProgStr94
++	db PROG_DEX
++	dw 23
++	db 134, 147 ; S_GIOVANNI
++	dw ProgStr95, ProgStr96
++	db PROG_DEX
++	dw 24
++	db 25, 12 ; S_DEX
++	dw ProgStr97, ProgStr72
++	db PROG_DEX
++	dw 25
++	db 47, 12 ; (DEX_PIKACHU+CUT)
++	dw ProgStr98, ProgStr99
++	db PROG_DEX
++	dw 26
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr100, ProgStr101
++	db PROG_DEX
++	dw 27
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr102, ProgStr103
++	db PROG_DEX
++	dw 28
++	db 25, 8 ; S_DEX
++	dw ProgStr104, ProgStr48
++	db PROG_DEX
++	dw 29
++	db 53, 83 ; COINCASE
++	dw ProgStr105, ProgStr106
++	db PROG_DEX
++	dw 30
++	db 54, 83 ; DEX_NIDORINA
++	dw ProgStr107, ProgStr108
++	db PROG_DEX
++	dw 31
++	db 25, 8 ; S_DEX
++	dw ProgStr109, ProgStr48
++	db PROG_DEX
++	dw 32
++	db 73, 105 ; S_FLUTE
++	dw ProgStr110, ProgStr111
++	db PROG_DEX
++	dw 33
++	db 76, 105 ; DEX_NIDORINO
++	dw ProgStr112, ProgStr113
++	db PROG_DEX
++	dw 34
++	db 29, 19 ; S_BROCK
++	dw ProgStr114, ProgStr115
++	db PROG_DEX
++	dw 35
++	db 30, 19 ; DEX_CLEFAIRY
++	dw ProgStr116, ProgStr117
++	db PROG_DEX
++	dw 36
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr118, ProgStr101
++	db PROG_DEX
++	dw 37
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr119, ProgStr101
++	db PROG_DEX
++	dw 38
++	db 29, 17 ; S_BROCK
++	dw ProgStr120, ProgStr121
++	db PROG_DEX
++	dw 39
++	db 31, 17 ; DEX_JIGGLYPUFF
++	dw ProgStr122, ProgStr123
++	db PROG_DEX
++	dw 40
++	db 29, 19 ; S_BROCK
++	dw ProgStr124, ProgStr115
++	db PROG_DEX
++	dw 41
++	db 100, 128 ; SURF
++	dw ProgStr125, ProgStr126
++	db PROG_DEX
++	dw 42
++	db 33, 30 ; S_MTMOON
++	dw ProgStr127, ProgStr128
++	db PROG_DEX
++	dw 43
++	db 73, 88 ; S_FLUTE
++	dw ProgStr129, ProgStr130
++	db PROG_DEX
++	dw 44
++	db 82, 88 ; (CUT+DEX_GLOOM)
++	dw ProgStr131, ProgStr132
++	db PROG_DEX
++	dw 45
++	db 29, 19 ; S_BROCK
++	dw ProgStr133, ProgStr115
++	db PROG_DEX
++	dw 46
++	db 73, 105 ; S_FLUTE
++	dw ProgStr134, ProgStr111
++	db PROG_DEX
++	dw 47
++	db 73, 88 ; S_FLUTE
++	dw ProgStr135, ProgStr130
++	db PROG_DEX
++	dw 48
++	db 73, 107 ; S_FLUTE
++	dw ProgStr136, ProgStr137
++	db PROG_DEX
++	dw 49
++	db 33, 54 ; S_MTMOON
++	dw ProgStr138, ProgStr139
++	db PROG_DEX
++	dw 50
++	db 33, 54 ; S_MTMOON
++	dw ProgStr140, ProgStr139
++	db PROG_DEX
++	dw 51
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr141, ProgStr101
++	db PROG_DEX
++	dw 52
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr142, ProgStr143
++	db PROG_DEX
++	dw 53
++	db 89, 22 ; SUPERROD
++	dw ProgStr144, ProgStr145
++	db PROG_DEX
++	dw 54
++	db 100, 128 ; SURF
++	dw ProgStr146, ProgStr126
++	db PROG_DEX
++	dw 55
++	db 33, 30 ; S_MTMOON
++	dw ProgStr147, ProgStr128
++	db PROG_DEX
++	dw 56
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr148, ProgStr149
++	db PROG_DEX
++	dw 57
++	db 45, 71 ; CUT
++	dw ProgStr150, ProgStr151
++	db PROG_DEX
++	dw 58
++	db 49, 71 ; (CUT+DEX_GROWLITHE)
++	dw ProgStr152, ProgStr153
++	db PROG_DEX
++	dw 59
++	db 88, 100 ; GOODROD
++	dw ProgStr154, ProgStr155
++	db PROG_DEX
++	dw 60
++	db 91, 58 ; (CUT+SUPERROD)
++	dw ProgStr156, ProgStr157
++	db PROG_DEX
++	dw 61
++	db 96, 58 ; (CUT+DEX_POLIWHIRL)
++	dw ProgStr158, ProgStr159
++	db PROG_DEX
++	dw 62
++	db 39, 27 ; S_RIVAL1
++	dw ProgStr160, ProgStr161
++	db PROG_DEX
++	dw 63
++	db 145, 157 ; S_CHAMPION
++	dw ProgStr162, ProgStr163
++	db PROG_DEX
++	dw 64
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr164, ProgStr165
++	db PROG_DEX
++	dw 65
++	db 45, 60 ; CUT
++	dw ProgStr166, ProgStr167
++	db PROG_DEX
++	dw 66
++	db 137, 148 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr168, ProgStr169
++	db PROG_DEX
++	dw 67
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr170, ProgStr171
++	db PROG_DEX
++	dw 68
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr172, ProgStr101
++	db PROG_DEX
++	dw 69
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr173, ProgStr174
++	db PROG_DEX
++	dw 70
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr175, ProgStr101
++	db PROG_DEX
++	dw 71
++	db 89, 0 ; SUPERROD
++	dw ProgStr176, ProgStr177
++	db PROG_DEX
++	dw 72
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr178, ProgStr179
++	db PROG_DEX
++	dw 73
++	db 29, 19 ; S_BROCK
++	dw ProgStr180, ProgStr115
++	db PROG_DEX
++	dw 74
++	db 137, 148 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr181, ProgStr169
++	db PROG_DEX
++	dw 75
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr182, ProgStr183
++	db PROG_DEX
++	dw 76
++	db 100, 134 ; SURF
++	dw ProgStr184, ProgStr185
++	db PROG_DEX
++	dw 77
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr186, ProgStr187
++	db PROG_DEX
++	dw 78
++	db 89, 105 ; SUPERROD
++	dw ProgStr188, ProgStr189
++	db PROG_DEX
++	dw 79
++	db 121, 130 ; (SURF+STRENGTH)
++	dw ProgStr190, ProgStr191
++	db PROG_DEX
++	dw 80
++	db 100, 144 ; SURF
++	dw ProgStr192, ProgStr193
++	db PROG_DEX
++	dw 81
++	db 100, 144 ; SURF
++	dw ProgStr194, ProgStr193
++	db PROG_DEX
++	dw 82
++	db 35, 38 ; (DEX_SPEAROW+S_MTMOON)
++	dw ProgStr195, ProgStr196
++	db PROG_DEX
++	dw 83
++	db 73, 95 ; S_FLUTE
++	dw ProgStr197, ProgStr89
++	db PROG_DEX
++	dw 84
++	db 145, 157 ; S_CHAMPION
++	dw ProgStr198, ProgStr163
++	db PROG_DEX
++	dw 85
++	db 100, 128 ; SURF
++	dw ProgStr199, ProgStr126
++	db PROG_DEX
++	dw 86
++	db 121, 129 ; (SURF+STRENGTH)
++	dw ProgStr200, ProgStr201
++	db PROG_DEX
++	dw 87
++	db 100, 134 ; SURF
++	dw ProgStr202, ProgStr185
++	db PROG_DEX
++	dw 88
++	db 100, 134 ; SURF
++	dw ProgStr203, ProgStr185
++	db PROG_DEX
++	dw 89
++	db 89, 34 ; SUPERROD
++	dw ProgStr204, ProgStr205
++	db PROG_DEX
++	dw 90
++	db 93, 34 ; (CUT+DEX_SHELLDER)
++	dw ProgStr206, ProgStr207
++	db PROG_DEX
++	dw 91
++	db 69, 66 ; S_HIDEOUT
++	dw ProgStr208, ProgStr209
++	db PROG_DEX
++	dw 92
++	db 69, 66 ; S_HIDEOUT
++	dw ProgStr210, ProgStr209
++	db PROG_DEX
++	dw 93
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr211, ProgStr212
++	db PROG_DEX
++	dw 94
++	db 45, 60 ; CUT
++	dw ProgStr213, ProgStr167
++	db PROG_DEX
++	dw 95
++	db 33, 51 ; S_MTMOON
++	dw ProgStr214, ProgStr215
++	db PROG_DEX
++	dw 96
++	db 145, 157 ; S_CHAMPION
++	dw ProgStr216, ProgStr163
++	db PROG_DEX
++	dw 97
++	db 89, 22 ; SUPERROD
++	dw ProgStr217, ProgStr145
++	db PROG_DEX
++	dw 98
++	db 138, 147 ; (SUPERROD+S_GIOVANNI)
++	dw ProgStr218, ProgStr219
++	db PROG_DEX
++	dw 99
++	db 45, 58 ; CUT
++	dw ProgStr220, ProgStr221
++	db PROG_DEX
++	dw 100
++	db 103, 139 ; (DEX_RAICHU+SURF)
++	dw ProgStr222, ProgStr223
++	db PROG_DEX
++	dw 101
++	db 73, 105 ; S_FLUTE
++	dw ProgStr224, ProgStr111
++	db PROG_DEX
++	dw 102
++	db 81, 105 ; (CUT+DEX_EXEGGCUTE)
++	dw ProgStr225, ProgStr226
++	db PROG_DEX
++	dw 103
++	db 69, 66 ; S_HIDEOUT
++	dw ProgStr227, ProgStr209
++	db PROG_DEX
++	dw 104
++	db 137, 148 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr228, ProgStr169
++	db PROG_DEX
++	dw 105
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr229, ProgStr230
++	db PROG_DEX
++	dw 106
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr231, ProgStr230
++	db PROG_DEX
++	dw 107
++	db 123, 99 ; (CYCLING+DEX_SLOWBRO)
++	dw ProgStr232, ProgStr233
++	db PROG_DEX
++	dw 108
++	db 100, 134 ; SURF
++	dw ProgStr234, ProgStr185
++	db PROG_DEX
++	dw 109
++	db 100, 134 ; SURF
++	dw ProgStr235, ProgStr185
++	db PROG_DEX
++	dw 110
++	db 73, 105 ; S_FLUTE
++	dw ProgStr236, ProgStr111
++	db PROG_DEX
++	dw 111
++	db 145, 158 ; S_CHAMPION
++	dw ProgStr237, ProgStr238
++	db PROG_DEX
++	dw 112
++	db 73, 105 ; S_FLUTE
++	dw ProgStr239, ProgStr111
++	db PROG_DEX
++	dw 113
++	db 100, 143 ; SURF
++	dw ProgStr240, ProgStr241
++	db PROG_DEX
++	dw 114
++	db 73, 106 ; S_FLUTE
++	dw ProgStr242, ProgStr243
++	db PROG_DEX
++	dw 115
++	db 100, 128 ; SURF
++	dw ProgStr244, ProgStr126
++	db PROG_DEX
++	dw 116
++	db 121, 129 ; (SURF+STRENGTH)
++	dw ProgStr245, ProgStr201
++	db PROG_DEX
++	dw 117
++	db 88, 100 ; GOODROD
++	dw ProgStr246, ProgStr155
++	db PROG_DEX
++	dw 118
++	db 89, 100 ; SUPERROD
++	dw ProgStr247, ProgStr248
++	db PROG_DEX
++	dw 119
++	db 110, 126 ; (SUPERROD+SURF)
++	dw ProgStr249, ProgStr250
++	db PROG_DEX
++	dw 120
++	db 113, 126 ; (CUT+DEX_STARYU)
++	dw ProgStr251, ProgStr252
++	db PROG_DEX
++	dw 121
++	db 40, 10 ; DEX_ABRA
++	dw ProgStr253, ProgStr254
++	db PROG_DEX
++	dw 122
++	db 53, 83 ; COINCASE
++	dw ProgStr255, ProgStr106
++	db PROG_DEX
++	dw 123
++	db 94, 24 ; DEX_POLIWHIRL
++	dw ProgStr256, ProgStr257
++	db PROG_DEX
++	dw 124
++	db 100, 144 ; SURF
++	dw ProgStr258, ProgStr193
++	db PROG_DEX
++	dw 125
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr259, ProgStr101
++	db PROG_DEX
++	dw 126
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr260, ProgStr101
++	db PROG_DEX
++	dw 127
++	db 73, 107 ; S_FLUTE
++	dw ProgStr261, ProgStr137
++	db PROG_DEX
++	dw 128
++	db 37, 35 ; OLDROD
++	dw ProgStr262, ProgStr263
++	db PROG_DEX
++	dw 129
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr264, ProgStr265
++	db PROG_DEX
++	dw 130
++	db 124, 120 ; S_DRINK
++	dw ProgStr266, ProgStr267
++	db PROG_DEX
++	dw 131
++	db 73, 91 ; S_FLUTE
++	dw ProgStr268, ProgStr269
++	db PROG_DEX
++	dw 132
++	db 45, 80 ; CUT
++	dw ProgStr270, ProgStr271
++	db PROG_DEX
++	dw 133
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr272, ProgStr273
++	db PROG_DEX
++	dw 134
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr274, ProgStr275
++	db PROG_DEX
++	dw 135
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr276, ProgStr277
++	db PROG_DEX
++	dw 136
++	db 53, 83 ; COINCASE
++	dw ProgStr278, ProgStr106
++	db PROG_DEX
++	dw 137
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr279, ProgStr280
++	db PROG_DEX
++	dw 138
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr281, ProgStr282
++	db PROG_DEX
++	dw 139
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr283, ProgStr284
++	db PROG_DEX
++	dw 140
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr285, ProgStr286
++	db PROG_DEX
++	dw 141
++	db 109, 141 ; (OLDAMBER+SURF)
++	dw ProgStr287, ProgStr288
++	db PROG_DEX
++	dw 142
++	db 79, 88 ; (SNORLAXLEFT+S_FLUTE)
++	dw ProgStr289, ProgStr32
++	db PROG_DEX
++	dw 143
++	db 117, 132 ; ((NOT_ARTICUNO+SURF)+STRENGTH)
++	dw ProgStr290, ProgStr291
++	db PROG_DEX
++	dw 144
++	db 108, 144 ; (NOT_ZAPDOS+SURF)
++	dw ProgStr292, ProgStr193
++	db PROG_DEX
++	dw 145
++	db 136, 149 ; ((NOT_MOLTRES+STRENGTH)+S_GIOVANNI)
++	dw ProgStr293, ProgStr294
++	db PROG_DEX
++	dw 146
++	db 53, 83 ; COINCASE
++	dw ProgStr295, ProgStr106
++	db PROG_DEX
++	dw 147
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr296, ProgStr297
++	db PROG_DEX
++	dw 148
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr298, ProgStr299
++	db PROG_DEX
++	dw 149
++	db 147, 159 ; (NOT_MEWTWO+S_CHAMPION)
++	dw ProgStr300, ProgStr301
++	db PROG_DEX
++	dw 150
++	db 145, 253 ; S_CHAMPION
++	dw ProgStr302, ProgStr303
++ProgCatEntries2:
++	db PROG_EVENT
++	dw PROGRESS_PC_POTION_EVENT
++	db 0, 2 ; ALWAYS
++	dw ProgStr304, ProgStr305
++	db PROG_TOGGLE
++	dw TOGGLE_VIRIDIAN_FOREST_ITEM_1
++	db 25, 12 ; S_DEX
++	dw ProgStr306, ProgStr72
++	db PROG_TOGGLE
++	dw TOGGLE_VIRIDIAN_FOREST_ITEM_2
++	db 25, 12 ; S_DEX
++	dw ProgStr304, ProgStr72
++	db PROG_TOGGLE
++	dw TOGGLE_VIRIDIAN_FOREST_ITEM_3
++	db 25, 12 ; S_DEX
++	dw ProgStr307, ProgStr72
++	db PROG_TOGGLE
++	dw TOGGLE_MT_MOON_1F_ITEM_1
++	db 29, 19 ; S_BROCK
++	dw ProgStr304, ProgStr115
++	db PROG_TOGGLE
++	dw TOGGLE_MT_MOON_1F_ITEM_2
++	db 29, 19 ; S_BROCK
++	dw ProgStr308, ProgStr115
++	db PROG_TOGGLE
++	dw TOGGLE_MT_MOON_1F_ITEM_3
++	db 29, 19 ; S_BROCK
++	dw ProgStr309, ProgStr115
++	db PROG_TOGGLE
++	dw TOGGLE_MT_MOON_1F_ITEM_4
++	db 29, 19 ; S_BROCK
++	dw ProgStr310, ProgStr115
++	db PROG_TOGGLE
++	dw TOGGLE_MT_MOON_1F_ITEM_5
++	db 29, 19 ; S_BROCK
++	dw ProgStr304, ProgStr115
++	db PROG_TOGGLE
++	dw TOGGLE_MT_MOON_1F_ITEM_6
++	db 29, 19 ; S_BROCK
++	dw ProgStr311, ProgStr115
++	db PROG_TOGGLE
++	dw TOGGLE_MT_MOON_B2F_ITEM_1
++	db 29, 21 ; S_BROCK
++	dw ProgStr312, ProgStr8
++	db PROG_TOGGLE
++	dw TOGGLE_MT_MOON_B2F_ITEM_2
++	db 29, 21 ; S_BROCK
++	dw ProgStr313, ProgStr8
++	db PROG_TOGGLE
++	dw TOGGLE_ROUTE_4_ITEM
++	db 33, 22 ; S_MTMOON
++	dw ProgStr314, ProgStr94
++	db PROG_TOGGLE
++	dw TOGGLE_ROUTE_24_ITEM
++	db 39, 27 ; S_RIVAL1
++	dw ProgStr315, ProgStr161
++ProgEnt1:
++	db PROG_TOGGLE
++	dw TOGGLE_SS_ANNE_1F_ROOMS_ITEM
++	db 42, 41 ; SSANNE
++	dw ProgStr316, ProgStr317
++ProgEnt2:
++	db PROG_TOGGLE
++	dw TOGGLE_SS_ANNE_2F_ROOMS_ITEM_1
++	db 42, 43 ; SSANNE
++	dw ProgStr318, ProgStr319
++ProgEnt3:
++	db PROG_TOGGLE
++	dw TOGGLE_SS_ANNE_2F_ROOMS_ITEM_2
++	db 42, 43 ; SSANNE
++	dw ProgStr309, ProgStr319
++ProgEnt4:
++	db PROG_TOGGLE
++	dw TOGGLE_SS_ANNE_B1F_ROOMS_ITEM_1
++	db 42, 47 ; SSANNE
++	dw ProgStr320, ProgStr321
++ProgEnt5:
++	db PROG_TOGGLE
++	dw TOGGLE_SS_ANNE_B1F_ROOMS_ITEM_2
++	db 42, 47 ; SSANNE
++	dw ProgStr322, ProgStr321
++ProgEnt6:
++	db PROG_TOGGLE
++	dw TOGGLE_SS_ANNE_B1F_ROOMS_ITEM_3
++	db 42, 47 ; SSANNE
++	dw ProgStr323, ProgStr321
++	db PROG_TOGGLE
++	dw TOGGLE_ROUTE_2_ITEM_1
++	db 45, 9 ; CUT
++	dw ProgStr308, ProgStr77
++	db PROG_TOGGLE
++	dw TOGGLE_ROUTE_2_ITEM_2
++	db 45, 9 ; CUT
++	dw ProgStr312, ProgStr77
++	db PROG_TOGGLE
++	dw TOGGLE_ROUTE_25_ITEM
++	db 45, 28 ; CUT
++	dw ProgStr324, ProgStr14
++	db PROG_TOGGLE
++	dw TOGGLE_ROUTE_9_ITEM
++	db 45, 57 ; CUT
++	dw ProgStr325, ProgStr326
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_TOWER_3F_ITEM
++	db 45, 66 ; CUT
++	dw ProgStr310, ProgStr209
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_TOWER_4F_ITEM_1
++	db 45, 67 ; CUT
++	dw ProgStr327, ProgStr328
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_TOWER_4F_ITEM_2
++	db 45, 67 ; CUT
++	dw ProgStr329, ProgStr328
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_TOWER_4F_ITEM_3
++	db 45, 67 ; CUT
++	dw ProgStr312, ProgStr328
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_TOWER_5F_ITEM
++	db 45, 68 ; CUT
++	dw ProgStr330, ProgStr331
++	db PROG_TOGGLE
++	dw TOGGLE_ROCKET_HIDEOUT_B1F_ITEM_1
++	db 45, 84 ; CUT
++	dw ProgStr310, ProgStr332
++	db PROG_TOGGLE
++	dw TOGGLE_ROCKET_HIDEOUT_B1F_ITEM_2
++	db 45, 84 ; CUT
++	dw ProgStr333, ProgStr332
++	db PROG_TOGGLE
++	dw TOGGLE_ROCKET_HIDEOUT_B2F_ITEM_1
++	db 45, 85 ; CUT
++	dw ProgStr308, ProgStr334
++	db PROG_TOGGLE
++	dw TOGGLE_ROCKET_HIDEOUT_B2F_ITEM_2
++	db 45, 85 ; CUT
++	dw ProgStr330, ProgStr334
++	db PROG_TOGGLE
++	dw TOGGLE_ROCKET_HIDEOUT_B2F_ITEM_3
++	db 45, 85 ; CUT
++	dw ProgStr335, ProgStr334
++	db PROG_TOGGLE
++	dw TOGGLE_ROCKET_HIDEOUT_B2F_ITEM_4
++	db 45, 85 ; CUT
++	dw ProgStr336, ProgStr334
++	db PROG_TOGGLE
++	dw TOGGLE_ROCKET_HIDEOUT_B3F_ITEM_1
++	db 45, 86 ; CUT
++	dw ProgStr337, ProgStr338
++	db PROG_TOGGLE
++	dw TOGGLE_ROCKET_HIDEOUT_B3F_ITEM_2
++	db 45, 86 ; CUT
++	dw ProgStr309, ProgStr338
++	db PROG_TOGGLE
++	dw TOGGLE_ROCKET_HIDEOUT_B4F_ITEM_1
++	db 45, 87 ; CUT
++	dw ProgStr312, ProgStr23
++	db PROG_TOGGLE
++	dw TOGGLE_ROCKET_HIDEOUT_B4F_ITEM_2
++	db 45, 87 ; CUT
++	dw ProgStr339, ProgStr23
++	db PROG_TOGGLE
++	dw TOGGLE_ROCKET_HIDEOUT_B4F_ITEM_3
++	db 45, 87 ; CUT
++	dw ProgStr340, ProgStr23
++	db PROG_TOGGLE | PROG_BOTH
++	dw TOGGLE_ROCKET_HIDEOUT_B4F_ITEM_5
++	db PROG_EVENT
++	dw EVENT_ROCKET_DROPPED_LIFT_KEY
++	db 65, 87 ; (CUT+SHOWN_TOGGLE_ROCKET_HIDEOUT_B4F_ITEM_5)
++	dw ProgStr341, ProgStr23
++	db PROG_TOGGLE | PROG_BOTH
++	dw TOGGLE_ROCKET_HIDEOUT_B4F_ITEM_4
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCKET_HIDEOUT_GIOVANNI
++	db 68, 87 ; (CUT+SHOWN_TOGGLE_ROCKET_HIDEOUT_B4F_ITEM_4)
++	dw ProgStr342, ProgStr23
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_TOWER_6F_ITEM_1
++	db 69, 69 ; S_HIDEOUT
++	dw ProgStr309, ProgStr26
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_TOWER_6F_ITEM_2
++	db 69, 69 ; S_HIDEOUT
++	dw ProgStr343, ProgStr26
++	db PROG_TOGGLE
++	dw TOGGLE_ROUTE_12_ITEM_2
++	db 73, 88 ; S_FLUTE
++	dw ProgStr340, ProgStr130
++	db PROG_TOGGLE
++	dw TOGGLE_ROUTE_15_ITEM
++	db 73, 93 ; S_FLUTE
++	dw ProgStr344, ProgStr345
++	db PROG_TOGGLE
++	dw TOGGLE_SAFARI_ZONE_CENTER_ITEM
++	db 73, 105 ; S_FLUTE
++	dw ProgStr330, ProgStr111
++	db PROG_TOGGLE
++	dw TOGGLE_SAFARI_ZONE_EAST_ITEM_1
++	db 73, 106 ; S_FLUTE
++	dw ProgStr346, ProgStr243
++	db PROG_TOGGLE
++	dw TOGGLE_SAFARI_ZONE_EAST_ITEM_2
++	db 73, 106 ; S_FLUTE
++	dw ProgStr323, ProgStr243
++	db PROG_TOGGLE
++	dw TOGGLE_SAFARI_ZONE_EAST_ITEM_3
++	db 73, 106 ; S_FLUTE
++	dw ProgStr347, ProgStr243
++	db PROG_TOGGLE
++	dw TOGGLE_SAFARI_ZONE_EAST_ITEM_4
++	db 73, 106 ; S_FLUTE
++	dw ProgStr348, ProgStr243
++	db PROG_TOGGLE
++	dw TOGGLE_SAFARI_ZONE_NORTH_ITEM_1
++	db 73, 107 ; S_FLUTE
++	dw ProgStr349, ProgStr137
++	db PROG_TOGGLE
++	dw TOGGLE_SAFARI_ZONE_NORTH_ITEM_2
++	db 73, 107 ; S_FLUTE
++	dw ProgStr350, ProgStr137
++	db PROG_TOGGLE
++	dw TOGGLE_SAFARI_ZONE_WEST_ITEM_1
++	db 73, 108 ; S_FLUTE
++	dw ProgStr323, ProgStr351
++	db PROG_TOGGLE
++	dw TOGGLE_SAFARI_ZONE_WEST_ITEM_2
++	db 73, 108 ; S_FLUTE
++	dw ProgStr352, ProgStr351
++	db PROG_TOGGLE
++	dw TOGGLE_SAFARI_ZONE_WEST_ITEM_3
++	db 73, 108 ; S_FLUTE
++	dw ProgStr353, ProgStr351
++	db PROG_TOGGLE
++	dw TOGGLE_SAFARI_ZONE_WEST_ITEM_4
++	db 73, 108 ; S_FLUTE
++	dw ProgStr354, ProgStr351
++	db PROG_TOGGLE
++	dw TOGGLE_ROUTE_12_ITEM_1
++	db 100, 88 ; SURF
++	dw ProgStr355, ProgStr130
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_MANSION_1F_ITEM_1
++	db 100, 134 ; SURF
++	dw ProgStr310, ProgStr185
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_MANSION_1F_ITEM_2
++	db 100, 134 ; SURF
++	dw ProgStr347, ProgStr185
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_MANSION_2F_ITEM
++	db 100, 135 ; SURF
++	dw ProgStr356, ProgStr357
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_MANSION_3F_ITEM_1
++	db 100, 136 ; SURF
++	dw ProgStr323, ProgStr358
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_MANSION_3F_ITEM_2
++	db 100, 136 ; SURF
++	dw ProgStr340, ProgStr358
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_MANSION_B1F_ITEM_1
++	db 100, 137 ; SURF
++	dw ProgStr309, ProgStr359
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_MANSION_B1F_ITEM_2
++	db 100, 137 ; SURF
++	dw ProgStr346, ProgStr359
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_MANSION_B1F_ITEM_3
++	db 100, 137 ; SURF
++	dw ProgStr360, ProgStr359
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_MANSION_B1F_ITEM_4
++	db 100, 137 ; SURF
++	dw ProgStr361, ProgStr359
++	db PROG_TOGGLE
++	dw TOGGLE_POKEMON_MANSION_B1F_ITEM_5
++	db 100, 137 ; SURF
++	dw ProgStr362, ProgStr359
++	db PROG_TOGGLE
++	dw TOGGLE_POWER_PLANT_ITEM_1
++	db 100, 144 ; SURF
++	dw ProgStr347, ProgStr193
++	db PROG_TOGGLE
++	dw TOGGLE_POWER_PLANT_ITEM_2
++	db 100, 144 ; SURF
++	dw ProgStr312, ProgStr193
++	db PROG_TOGGLE
++	dw TOGGLE_POWER_PLANT_ITEM_3
++	db 100, 144 ; SURF
++	dw ProgStr309, ProgStr193
++	db PROG_TOGGLE
++	dw TOGGLE_POWER_PLANT_ITEM_4
++	db 100, 144 ; SURF
++	dw ProgStr363, ProgStr193
++	db PROG_TOGGLE
++	dw TOGGLE_POWER_PLANT_ITEM_5
++	db 100, 144 ; SURF
++	dw ProgStr364, ProgStr193
++	db PROG_TOGGLE
++	dw TOGGLE_WARDENS_HOUSE_ITEM
++	db 115, 103 ; STRENGTH
++	dw ProgStr309, ProgStr38
++	db PROG_TOGGLE
++	dw TOGGLE_SILPH_CO_3F_ITEM
++	db 124, 116 ; S_DRINK
++	dw ProgStr333, ProgStr365
++	db PROG_TOGGLE
++	dw TOGGLE_SILPH_CO_4F_ITEM_1
++	db 124, 117 ; S_DRINK
++	dw ProgStr366, ProgStr367
++	db PROG_TOGGLE
++	dw TOGGLE_SILPH_CO_4F_ITEM_2
++	db 124, 117 ; S_DRINK
++	dw ProgStr353, ProgStr367
++	db PROG_TOGGLE
++	dw TOGGLE_SILPH_CO_4F_ITEM_3
++	db 124, 117 ; S_DRINK
++	dw ProgStr310, ProgStr367
++	db PROG_TOGGLE
++	dw TOGGLE_SILPH_CO_5F_ITEM_1
++	db 124, 118 ; S_DRINK
++	dw ProgStr368, ProgStr369
++	db PROG_TOGGLE
++	dw TOGGLE_SILPH_CO_5F_ITEM_2
++	db 124, 118 ; S_DRINK
++	dw ProgStr349, ProgStr369
++	db PROG_TOGGLE
++	dw TOGGLE_SILPH_CO_5F_ITEM_3
++	db 124, 118 ; S_DRINK
++	dw ProgStr370, ProgStr369
++	db PROG_TOGGLE
++	dw TOGGLE_SILPH_CO_6F_ITEM_1
++	db 124, 119 ; S_DRINK
++	dw ProgStr312, ProgStr371
++	db PROG_TOGGLE
++	dw TOGGLE_SILPH_CO_6F_ITEM_2
++	db 124, 119 ; S_DRINK
++	dw ProgStr343, ProgStr371
++	db PROG_TOGGLE
++	dw TOGGLE_SILPH_CO_7F_ITEM_1
++	db 124, 120 ; S_DRINK
++	dw ProgStr356, ProgStr41
++	db PROG_TOGGLE
++	dw TOGGLE_SILPH_CO_7F_ITEM_2
++	db 124, 120 ; S_DRINK
++	dw ProgStr372, ProgStr41
++	db PROG_TOGGLE
++	dw TOGGLE_SILPH_CO_10F_ITEM_1
++	db 124, 123 ; S_DRINK
++	dw ProgStr373, ProgStr374
++	db PROG_TOGGLE
++	dw TOGGLE_SILPH_CO_10F_ITEM_2
++	db 124, 123 ; S_DRINK
++	dw ProgStr309, ProgStr374
++	db PROG_TOGGLE
++	dw TOGGLE_SILPH_CO_10F_ITEM_3
++	db 124, 123 ; S_DRINK
++	dw ProgStr347, ProgStr374
++	db PROG_TOGGLE
++	dw TOGGLE_VIRIDIAN_GYM_ITEM
++	db 129, 145 ; S_SABRINA
++	dw ProgStr375, ProgStr47
++	db PROG_TOGGLE
++	dw TOGGLE_VICTORY_ROAD_1F_ITEM_1
++	db 137, 148 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr376, ProgStr169
++	db PROG_TOGGLE
++	dw TOGGLE_VICTORY_ROAD_1F_ITEM_2
++	db 137, 148 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr309, ProgStr169
++	db PROG_TOGGLE
++	dw TOGGLE_VICTORY_ROAD_2F_ITEM_1
++	db 137, 149 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr377, ProgStr294
++	db PROG_TOGGLE
++	dw TOGGLE_VICTORY_ROAD_2F_ITEM_2
++	db 137, 149 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr366, ProgStr294
++	db PROG_TOGGLE
++	dw TOGGLE_VICTORY_ROAD_2F_ITEM_3
++	db 137, 149 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr378, ProgStr294
++	db PROG_TOGGLE
++	dw TOGGLE_VICTORY_ROAD_2F_ITEM_4
++	db 137, 149 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr379, ProgStr294
++	db PROG_TOGGLE
++	dw TOGGLE_VICTORY_ROAD_3F_ITEM_1
++	db 137, 150 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr353, ProgStr380
++	db PROG_TOGGLE
++	dw TOGGLE_VICTORY_ROAD_3F_ITEM_2
++	db 137, 150 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr381, ProgStr380
++	db PROG_TOGGLE
++	dw TOGGLE_CERULEAN_CAVE_1F_ITEM_1
++	db 145, 157 ; S_CHAMPION
++	dw ProgStr346, ProgStr163
++	db PROG_TOGGLE
++	dw TOGGLE_CERULEAN_CAVE_1F_ITEM_2
++	db 145, 157 ; S_CHAMPION
++	dw ProgStr382, ProgStr163
++	db PROG_TOGGLE
++	dw TOGGLE_CERULEAN_CAVE_1F_ITEM_3
++	db 145, 157 ; S_CHAMPION
++	dw ProgStr330, ProgStr163
++	db PROG_TOGGLE
++	dw TOGGLE_CERULEAN_CAVE_2F_ITEM_1
++	db 145, 158 ; S_CHAMPION
++	dw ProgStr383, ProgStr238
++	db PROG_TOGGLE
++	dw TOGGLE_CERULEAN_CAVE_2F_ITEM_2
++	db 145, 158 ; S_CHAMPION
++	dw ProgStr384, ProgStr238
++	db PROG_TOGGLE
++	dw TOGGLE_CERULEAN_CAVE_2F_ITEM_3
++	db 145, 158 ; S_CHAMPION
++	dw ProgStr346, ProgStr238
++	db PROG_TOGGLE
++	dw TOGGLE_CERULEAN_CAVE_B1F_ITEM_1
++	db 145, 159 ; S_CHAMPION
++	dw ProgStr384, ProgStr301
++	db PROG_TOGGLE
++	dw TOGGLE_CERULEAN_CAVE_B1F_ITEM_2
++	db 145, 159 ; S_CHAMPION
++	dw ProgStr353, ProgStr301
++ProgCatEntries3:
++	db PROG_HIDDENCOIN
++	dw 0
++	db 55, 83 ; (CUT+COINCASE)
++	dw ProgStr385, ProgStr386
++	db PROG_HIDDENCOIN
++	dw 1
++	db 55, 83 ; (CUT+COINCASE)
++	dw ProgStr385, ProgStr386
++	db PROG_HIDDENCOIN
++	dw 2
++	db 55, 83 ; (CUT+COINCASE)
++	dw ProgStr387, ProgStr386
++	db PROG_HIDDENCOIN
++	dw 3
++	db 55, 83 ; (CUT+COINCASE)
++	dw ProgStr385, ProgStr386
++	db PROG_HIDDENCOIN
++	dw 4
++	db 55, 83 ; (CUT+COINCASE)
++	dw ProgStr385, ProgStr386
++	db PROG_HIDDENCOIN
++	dw 5
++	db 55, 83 ; (CUT+COINCASE)
++	dw ProgStr387, ProgStr386
++	db PROG_HIDDENCOIN
++	dw 6
++	db 55, 83 ; (CUT+COINCASE)
++	dw ProgStr385, ProgStr386
++	db PROG_HIDDENCOIN
++	dw 7
++	db 55, 83 ; (CUT+COINCASE)
++	dw ProgStr385, ProgStr386
++	db PROG_HIDDENCOIN
++	dw 8
++	db 55, 83 ; (CUT+COINCASE)
++	dw ProgStr385, ProgStr386
++	db PROG_HIDDENCOIN
++	dw 9
++	db 55, 83 ; (CUT+COINCASE)
++	dw ProgStr388, ProgStr386
++	db PROG_HIDDENCOIN
++	dw 10
++	db 55, 83 ; (CUT+COINCASE)
++	dw ProgStr389, ProgStr386
++	db PROG_HIDDENCOIN
++	dw 11
++	db 55, 83 ; (CUT+COINCASE)
++	dw ProgStr385, ProgStr386
++	db PROG_HIDDEN
++	dw 35
++	db 56, 6 ; ITEMFINDER
++	dw ProgStr304, ProgStr390
++	db PROG_HIDDEN
++	dw 0
++	db 56, 12 ; ITEMFINDER
++	dw ProgStr304, ProgStr72
++	db PROG_HIDDEN
++	dw 1
++	db 56, 12 ; ITEMFINDER
++	dw ProgStr306, ProgStr72
++	db PROG_HIDDEN
++	dw 2
++	db 56, 21 ; ITEMFINDER
++	dw ProgStr308, ProgStr8
++	db PROG_HIDDEN
++	dw 49
++	db 56, 21 ; ITEMFINDER
++	dw ProgStr320, ProgStr8
++	db PROG_HIDDEN
++	dw 53
++	db 56, 22 ; ITEMFINDER
++	dw ProgStr391, ProgStr94
++	db PROG_HIDDEN
++	dw 52
++	db 56, 23 ; ITEMFINDER
++	dw ProgStr309, ProgStr10
++	db PROG_HIDDEN
++	dw 43
++	db 56, 32 ; ITEMFINDER
++	dw ProgStr346, ProgStr392
++	db PROG_HIDDEN
++	dw 44
++	db 56, 32 ; ITEMFINDER
++	dw ProgStr393, ProgStr392
++	db PROG_HIDDEN
++	dw 36
++	db 56, 51 ; ITEMFINDER
++	dw ProgStr310, ProgStr215
++	db PROG_HIDDEN
++	dw 3
++	db 61, 28 ; (S_RIVAL1+ITEMFINDER)
++	dw ProgStr320, ProgStr14
++	db PROG_HIDDEN
++	dw 48
++	db 61, 28 ; (S_RIVAL1+ITEMFINDER)
++	dw ProgStr327, ProgStr14
++ProgEnt8:
++	db PROG_HIDDEN
++	dw 6
++	db 59, 47 ; (SSANNE+ITEMFINDER)
++	dw ProgStr333, ProgStr321
++ProgEnt7:
++	db PROG_HIDDEN
++	dw 5
++	db 59, 48 ; (SSANNE+ITEMFINDER)
++	dw ProgStr391, ProgStr394
++	db PROG_HIDDEN
++	dw 4
++	db 58, 57 ; (CUT+ITEMFINDER)
++	dw ProgStr320, ProgStr326
++	db PROG_HIDDEN
++	dw 7
++	db 58, 58 ; (CUT+ITEMFINDER)
++	dw ProgStr336, ProgStr221
++	db PROG_HIDDEN
++	dw 8
++	db 58, 58 ; (CUT+ITEMFINDER)
++	dw ProgStr318, ProgStr221
++	db PROG_HIDDEN
++	dw 12
++	db 58, 68 ; (CUT+ITEMFINDER)
++	dw ProgStr327, ProgStr331
++	db PROG_HIDDEN
++	dw 45
++	db 58, 73 ; (CUT+ITEMFINDER)
++	dw ProgStr330, ProgStr395
++	db PROG_HIDDEN
++	dw 46
++	db 58, 73 ; (CUT+ITEMFINDER)
++	dw ProgStr327, ProgStr395
++	db PROG_HIDDEN
++	dw 47
++	db 58, 76 ; (CUT+ITEMFINDER)
++	dw ProgStr383, ProgStr396
++	db PROG_HIDDEN
++	dw 9
++	db 58, 84 ; (CUT+ITEMFINDER)
++	dw ProgStr383, ProgStr332
++	db PROG_HIDDEN
++	dw 10
++	db 58, 86 ; (CUT+ITEMFINDER)
++	dw ProgStr330, ProgStr338
++	db PROG_HIDDEN
++	dw 11
++	db 58, 87 ; (CUT+ITEMFINDER)
++	dw ProgStr336, ProgStr23
++	db PROG_HIDDEN
++	dw 37
++	db 78, 88 ; (ITEMFINDER+S_FLUTE)
++	dw ProgStr333, ProgStr130
++	db PROG_HIDDEN
++	dw 13
++	db 78, 91 ; (ITEMFINDER+S_FLUTE)
++	dw ProgStr383, ProgStr269
++	db PROG_HIDDEN
++	dw 14
++	db 78, 91 ; (ITEMFINDER+S_FLUTE)
++	dw ProgStr356, ProgStr269
++	db PROG_HIDDEN
++	dw 17
++	db 78, 108 ; (ITEMFINDER+S_FLUTE)
++	dw ProgStr375, ProgStr351
++	db PROG_HIDDEN
++	dw 38
++	db 84, 97 ; (ITEMFINDER+CYCLING)
++	dw ProgStr309, ProgStr92
++	db PROG_HIDDEN
++	dw 39
++	db 84, 97 ; (ITEMFINDER+CYCLING)
++	dw ProgStr346, ProgStr92
++	db PROG_HIDDEN
++	dw 40
++	db 84, 97 ; (ITEMFINDER+CYCLING)
++	dw ProgStr383, ProgStr92
++	db PROG_HIDDEN
++	dw 41
++	db 84, 97 ; (ITEMFINDER+CYCLING)
++	dw ProgStr353, ProgStr92
++	db PROG_HIDDEN
++	dw 42
++	db 84, 97 ; (ITEMFINDER+CYCLING)
++	dw ProgStr382, ProgStr92
++	db PROG_HIDDEN
++	dw 51
++	db 106, 35 ; (ITEMFINDER+SURF)
++	dw ProgStr318, ProgStr397
++	db PROG_HIDDEN
++	dw 27
++	db 106, 134 ; (ITEMFINDER+SURF)
++	dw ProgStr308, ProgStr185
++	db PROG_HIDDEN
++	dw 28
++	db 106, 136 ; (ITEMFINDER+SURF)
++	dw ProgStr353, ProgStr358
++	db PROG_HIDDEN
++	dw 15
++	db 106, 137 ; (ITEMFINDER+SURF)
++	dw ProgStr309, ProgStr359
++	db PROG_HIDDEN
++	dw 23
++	db 106, 144 ; (ITEMFINDER+SURF)
++	dw ProgStr382, ProgStr193
++	db PROG_HIDDEN
++	dw 24
++	db 106, 144 ; (ITEMFINDER+SURF)
++	dw ProgStr383, ProgStr193
++	db PROG_HIDDEN
++	dw 25
++	db 116, 130 ; ((ITEMFINDER+SURF)+STRENGTH)
++	dw ProgStr330, ProgStr191
++	db PROG_HIDDEN
++	dw 50
++	db 116, 131 ; ((ITEMFINDER+SURF)+STRENGTH)
++	dw ProgStr382, ProgStr398
++	db PROG_HIDDEN
++	dw 26
++	db 116, 132 ; ((ITEMFINDER+SURF)+STRENGTH)
++	dw ProgStr384, ProgStr291
++	db PROG_HIDDEN
++	dw 20
++	db 125, 111 ; (ITEMFINDER+S_DRINK)
++	dw ProgStr330, ProgStr399
++	db PROG_HIDDEN
++	dw 18
++	db 125, 118 ; (ITEMFINDER+S_DRINK)
++	dw ProgStr327, ProgStr369
++	db PROG_HIDDEN
++	dw 19
++	db 125, 122 ; (ITEMFINDER+S_DRINK)
++	dw ProgStr323, ProgStr400
++	db PROG_HIDDEN
++	dw 29
++	db 135, 147 ; ((ITEMFINDER+STRENGTH)+S_GIOVANNI)
++	dw ProgStr346, ProgStr96
++	db PROG_HIDDEN
++	dw 30
++	db 135, 147 ; ((ITEMFINDER+STRENGTH)+S_GIOVANNI)
++	dw ProgStr384, ProgStr96
++	db PROG_HIDDEN
++	dw 31
++	db 135, 147 ; ((ITEMFINDER+STRENGTH)+S_GIOVANNI)
++	dw ProgStr318, ProgStr96
++	db PROG_HIDDEN
++	dw 32
++	db 135, 149 ; ((ITEMFINDER+STRENGTH)+S_GIOVANNI)
++	dw ProgStr384, ProgStr294
++	db PROG_HIDDEN
++	dw 33
++	db 135, 149 ; ((ITEMFINDER+STRENGTH)+S_GIOVANNI)
++	dw ProgStr346, ProgStr294
++	db PROG_HIDDEN
++	dw 21
++	db 146, 157 ; (ITEMFINDER+S_CHAMPION)
++	dw ProgStr309, ProgStr163
++	db PROG_HIDDEN
++	dw 22
++	db 146, 159 ; (ITEMFINDER+S_CHAMPION)
++	dw ProgStr384, ProgStr301
++ProgCatEntries4:
++	db PROG_EVENT
++	dw EVENT_GOT_POTION_SAMPLE
++	db 21, 5 ; S_STARTER
++	dw ProgStr304, ProgStr82
++	db PROG_EVENT
++	dw EVENT_GOT_POKEBALLS_FROM_OAK
++	db 24, 4 ; R22BEATEN
++	dw ProgStr401, ProgStr402
++	db PROG_EVENT
++	dw EVENT_GOT_TOWN_MAP
++	db 25, 3 ; S_DEX
++	dw ProgStr403, ProgStr404
++	db PROG_EVENT
++	dw EVENT_GOT_TM34
++	db 29, 16 ; S_BROCK
++	dw ProgStr405, ProgStr6
++	db PROG_EVENT | PROG_EITHER
++	dw EVENT_GOT_DOME_FOSSIL
++	db PROG_EVENT
++	dw EVENT_GOT_HELIX_FOSSIL
++	db 29, 21 ; S_BROCK
++	dw ProgStr406, ProgStr8
++	db PROG_FLAGS1
++	dw BIT_GOT_OLD_ROD
++	db 33, 36 ; S_MTMOON
++	dw ProgStr263, ProgStr397
++	db PROG_EVENT
++	dw EVENT_GOT_BIKE_VOUCHER
++	db 33, 37 ; S_MTMOON
++	dw ProgStr407, ProgStr408
++	db PROG_EVENT
++	dw EVENT_GOT_BICYCLE
++	db 38, 26 ; VOUCHER
++	dw ProgStr409, ProgStr410
++	db PROG_EVENT
++	dw EVENT_GOT_NUGGET
++	db 39, 27 ; S_RIVAL1
++	dw ProgStr330, ProgStr161
++	db PROG_EVENT
++	dw EVENT_GOT_TM11
++	db 41, 25 ; S_MISTY
++	dw ProgStr411, ProgStr12
++	db PROG_EVENT
++	dw EVENT_GOT_TM42
++	db 45, 6 ; CUT
++	dw ProgStr412, ProgStr390
++	db PROG_EVENT
++	dw EVENT_GOT_OLD_AMBER
++	db 45, 15 ; CUT
++	dw ProgStr288, ProgStr413
++	db PROG_EVENT
++	dw EVENT_GOT_TM18
++	db 45, 77 ; CUT
++	dw ProgStr414, ProgStr415
++	db PROG_EVENT
++	dw EVENT_GOT_TM13
++	db 45, 78 ; CUT
++	dw ProgStr416, ProgStr417
++	db PROG_EVENT
++	dw EVENT_GOT_TM48
++	db 45, 78 ; CUT
++	dw ProgStr418, ProgStr417
++	db PROG_EVENT
++	dw EVENT_GOT_TM49
++	db 45, 78 ; CUT
++	dw ProgStr419, ProgStr417
++	db PROG_EVENT
++	dw EVENT_GOT_COIN_CASE
++	db 45, 81 ; CUT
++	dw ProgStr420, ProgStr421
++	db PROG_EVENT
++	dw EVENT_GOT_HM05
++	db 48, 56 ; (OWN10+CUT)
++	dw ProgStr422, ProgStr423
++	db PROG_EVENT
++	dw EVENT_GOT_10_COINS
++	db 55, 83 ; (CUT+COINCASE)
++	dw ProgStr385, ProgStr424
++	db PROG_EVENT
++	dw EVENT_GOT_20_COINS
++	db 55, 83 ; (CUT+COINCASE)
++	dw ProgStr387, ProgStr424
++	db PROG_EVENT
++	dw EVENT_GOT_20_COINS_2
++	db 55, 83 ; (CUT+COINCASE)
++	dw ProgStr387, ProgStr424
++	db PROG_EVENT
++	dw EVENT_GOT_ITEMFINDER
++	db 60, 52 ; (S_MTMOON+OWN30)
++	dw ProgStr425, ProgStr426
++	db PROG_EVENT
++	dw EVENT_GOT_TM24
++	db 62, 50 ; S_SURGE
++	dw ProgStr427, ProgStr18
++	db PROG_TOGGLE
++	dw TOGGLE_CERULEAN_ROCKET
++	db 63, 23 ; S_THIEF
++	dw ProgStr428, ProgStr10
++	db PROG_EVENT
++	dw EVENT_GOT_TM21
++	db 66, 82 ; S_ERIKA
++	dw ProgStr429, ProgStr21
++	db PROG_EVENT
++	dw EVENT_GOT_TM39
++	db 73, 89 ; S_FLUTE
++	dw ProgStr430, ProgStr431
++	db PROG_FLAGS1
++	dw BIT_GOT_SUPER_ROD
++	db 73, 90 ; S_FLUTE
++	dw ProgStr432, ProgStr433
++	db PROG_EVENT
++	dw EVENT_GOT_HM02
++	db 73, 96 ; S_FLUTE
++	dw ProgStr434, ProgStr435
++	db PROG_FLAGS1
++	dw BIT_GOT_GOOD_ROD
++	db 73, 101 ; S_FLUTE
++	dw ProgStr155, ProgStr436
++	db PROG_EVENT
++	dw EVENT_GOT_EXP_ALL
++	db 97, 94 ; (S_FLUTE+OWN50)
++	dw ProgStr437, ProgStr438
++	db PROG_EVENT
++	dw EVENT_GOT_TM06
++	db 98, 102 ; S_KOGA
++	dw ProgStr439, ProgStr34
++	db PROG_EVENT
++	dw EVENT_GOT_TM41
++	db 100, 76 ; SURF
++	dw ProgStr440, ProgStr396
++	db PROG_EVENT
++	dw EVENT_GOT_TM35
++	db 100, 140 ; SURF
++	dw ProgStr441, ProgStr442
++	db PROG_EVENT
++	dw EVENT_GOT_TM31
++	db 124, 111 ; S_DRINK
++	dw ProgStr443, ProgStr399
++	db PROG_EVENT
++	dw EVENT_GOT_TM29
++	db 124, 112 ; S_DRINK
++	dw ProgStr444, ProgStr445
++	db PROG_EVENT
++	dw EVENT_GOT_TM36
++	db 124, 115 ; S_DRINK
++	dw ProgStr446, ProgStr447
++	db PROG_EVENT
++	dw EVENT_GOT_MASTER_BALL
++	db 128, 124 ; S_SILPH
++	dw ProgStr448, ProgStr42
++	db PROG_EVENT
++	dw EVENT_GOT_TM46
++	db 129, 125 ; S_SABRINA
++	dw ProgStr449, ProgStr44
++	db PROG_EVENT
++	dw EVENT_GOT_TM38
++	db 133, 142 ; (SECRETKEY+S_BLAINE)
++	dw ProgStr450, ProgStr46
++	db PROG_EVENT
++	dw EVENT_GOT_TM27
++	db 134, 145 ; S_GIOVANNI
++	dw ProgStr451, ProgStr47
++	db PROG_EVENT
++	dw PROGRESS_DIPLOMA_EVENT
++	db 150, 79 ; (CUT+OWN150)
++	dw ProgStr452, ProgStr453
++ProgCatEntries5:
++	db PROG_EVENT
++	dw EVENT_BATTLED_RIVAL_IN_OAKS_LAB
++	db 21, 4 ; S_STARTER
++	dw ProgStr454, ProgStr1
++ProgEnt0:
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE22_RIVAL_1ST_BATTLE
++	db 23, 8 ; R22RIVAL1
++	dw ProgStr454, ProgStr48
++	db PROG_EVENT
++	dw EVENT_BEAT_VIRIDIAN_FOREST_TRAINER_0
++	db 25, 12 ; S_DEX
++	dw ProgStr455, ProgStr72
++	db PROG_EVENT
++	dw EVENT_BEAT_VIRIDIAN_FOREST_TRAINER_1
++	db 25, 12 ; S_DEX
++	dw ProgStr455, ProgStr72
++	db PROG_EVENT
++	dw EVENT_BEAT_VIRIDIAN_FOREST_TRAINER_2
++	db 25, 12 ; S_DEX
++	dw ProgStr455, ProgStr72
++	db PROG_EVENT
++	dw EVENT_BEAT_PEWTER_GYM_TRAINER_0
++	db 25, 16 ; S_DEX
++	dw ProgStr456, ProgStr6
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_3_TRAINER_0
++	db 29, 17 ; S_BROCK
++	dw ProgStr455, ProgStr121
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_3_TRAINER_1
++	db 29, 17 ; S_BROCK
++	dw ProgStr457, ProgStr121
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_3_TRAINER_2
++	db 29, 17 ; S_BROCK
++	dw ProgStr458, ProgStr121
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_3_TRAINER_3
++	db 29, 17 ; S_BROCK
++	dw ProgStr455, ProgStr121
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_3_TRAINER_4
++	db 29, 17 ; S_BROCK
++	dw ProgStr458, ProgStr121
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_3_TRAINER_5
++	db 29, 17 ; S_BROCK
++	dw ProgStr457, ProgStr121
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_3_TRAINER_6
++	db 29, 17 ; S_BROCK
++	dw ProgStr455, ProgStr121
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_3_TRAINER_7
++	db 29, 17 ; S_BROCK
++	dw ProgStr458, ProgStr121
++	db PROG_EVENT
++	dw EVENT_BEAT_MT_MOON_1_TRAINER_0
++	db 29, 19 ; S_BROCK
++	dw ProgStr459, ProgStr115
++	db PROG_EVENT
++	dw EVENT_BEAT_MT_MOON_1_TRAINER_1
++	db 29, 19 ; S_BROCK
++	dw ProgStr457, ProgStr115
++	db PROG_EVENT
++	dw EVENT_BEAT_MT_MOON_1_TRAINER_2
++	db 29, 19 ; S_BROCK
++	dw ProgStr458, ProgStr115
++	db PROG_EVENT
++	dw EVENT_BEAT_MT_MOON_1_TRAINER_3
++	db 29, 19 ; S_BROCK
++	dw ProgStr460, ProgStr115
++	db PROG_EVENT
++	dw EVENT_BEAT_MT_MOON_1_TRAINER_4
++	db 29, 19 ; S_BROCK
++	dw ProgStr458, ProgStr115
++	db PROG_EVENT
++	dw EVENT_BEAT_MT_MOON_1_TRAINER_5
++	db 29, 19 ; S_BROCK
++	dw ProgStr455, ProgStr115
++	db PROG_EVENT
++	dw EVENT_BEAT_MT_MOON_1_TRAINER_6
++	db 29, 19 ; S_BROCK
++	dw ProgStr455, ProgStr115
++	db PROG_EVENT
++	dw EVENT_BEAT_MT_MOON_3_TRAINER_0
++	db 29, 21 ; S_BROCK
++	dw ProgStr461, ProgStr8
++	db PROG_EVENT
++	dw EVENT_BEAT_MT_MOON_3_TRAINER_1
++	db 29, 21 ; S_BROCK
++	dw ProgStr461, ProgStr8
++	db PROG_EVENT
++	dw EVENT_BEAT_MT_MOON_3_TRAINER_2
++	db 29, 21 ; S_BROCK
++	dw ProgStr461, ProgStr8
++	db PROG_EVENT
++	dw EVENT_BEAT_MT_MOON_3_TRAINER_3
++	db 29, 21 ; S_BROCK
++	dw ProgStr461, ProgStr8
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_4_TRAINER_0
++	db 33, 22 ; S_MTMOON
++	dw ProgStr458, ProgStr94
++	db PROG_EVENT
++	dw EVENT_BEAT_CERULEAN_GYM_TRAINER_0
++	db 33, 25 ; S_MTMOON
++	dw ProgStr462, ProgStr12
++	db PROG_EVENT
++	dw EVENT_BEAT_CERULEAN_GYM_TRAINER_1
++	db 33, 25 ; S_MTMOON
++	dw ProgStr463, ProgStr12
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_6_TRAINER_0
++	db 33, 34 ; S_MTMOON
++	dw ProgStr456, ProgStr464
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_6_TRAINER_1
++	db 33, 34 ; S_MTMOON
++	dw ProgStr462, ProgStr464
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_6_TRAINER_2
++	db 33, 34 ; S_MTMOON
++	dw ProgStr455, ProgStr464
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_6_TRAINER_3
++	db 33, 34 ; S_MTMOON
++	dw ProgStr456, ProgStr464
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_6_TRAINER_4
++	db 33, 34 ; S_MTMOON
++	dw ProgStr462, ProgStr464
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_6_TRAINER_5
++	db 33, 34 ; S_MTMOON
++	dw ProgStr455, ProgStr464
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_11_TRAINER_0
++	db 33, 51 ; S_MTMOON
++	dw ProgStr465, ProgStr215
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_11_TRAINER_1
++	db 33, 51 ; S_MTMOON
++	dw ProgStr465, ProgStr215
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_11_TRAINER_2
++	db 33, 51 ; S_MTMOON
++	dw ProgStr457, ProgStr215
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_11_TRAINER_3
++	db 33, 51 ; S_MTMOON
++	dw ProgStr466, ProgStr215
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_11_TRAINER_4
++	db 33, 51 ; S_MTMOON
++	dw ProgStr457, ProgStr215
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_11_TRAINER_5
++	db 33, 51 ; S_MTMOON
++	dw ProgStr465, ProgStr215
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_11_TRAINER_6
++	db 33, 51 ; S_MTMOON
++	dw ProgStr465, ProgStr215
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_11_TRAINER_7
++	db 33, 51 ; S_MTMOON
++	dw ProgStr457, ProgStr215
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_11_TRAINER_8
++	db 33, 51 ; S_MTMOON
++	dw ProgStr466, ProgStr215
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_11_TRAINER_9
++	db 33, 51 ; S_MTMOON
++	dw ProgStr457, ProgStr215
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_24_TRAINER_0
++	db 39, 27 ; S_RIVAL1
++	dw ProgStr456, ProgStr161
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_24_TRAINER_1
++	db 39, 27 ; S_RIVAL1
++	dw ProgStr456, ProgStr161
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_24_TRAINER_2
++	db 39, 27 ; S_RIVAL1
++	dw ProgStr458, ProgStr161
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_24_TRAINER_3
++	db 39, 27 ; S_RIVAL1
++	dw ProgStr457, ProgStr161
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_24_TRAINER_4
++	db 39, 27 ; S_RIVAL1
++	dw ProgStr458, ProgStr161
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_24_TRAINER_5
++	db 39, 27 ; S_RIVAL1
++	dw ProgStr455, ProgStr161
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE24_ROCKET
++	db 39, 27 ; S_RIVAL1
++	dw ProgStr461, ProgStr161
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_25_TRAINER_0
++	db 39, 28 ; S_RIVAL1
++	dw ProgStr457, ProgStr14
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_25_TRAINER_1
++	db 39, 28 ; S_RIVAL1
++	dw ProgStr457, ProgStr14
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_25_TRAINER_2
++	db 39, 28 ; S_RIVAL1
++	dw ProgStr456, ProgStr14
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_25_TRAINER_3
++	db 39, 28 ; S_RIVAL1
++	dw ProgStr458, ProgStr14
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_25_TRAINER_4
++	db 39, 28 ; S_RIVAL1
++	dw ProgStr457, ProgStr14
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_25_TRAINER_5
++	db 39, 28 ; S_RIVAL1
++	dw ProgStr458, ProgStr14
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_25_TRAINER_6
++	db 39, 28 ; S_RIVAL1
++	dw ProgStr459, ProgStr14
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_25_TRAINER_7
++	db 39, 28 ; S_RIVAL1
++	dw ProgStr459, ProgStr14
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_25_TRAINER_8
++	db 39, 28 ; S_RIVAL1
++	dw ProgStr459, ProgStr14
++ProgEnt9:
++	db PROG_EVENT
++	dw EVENT_BEAT_SS_ANNE_8_TRAINER_0
++	db 42, 41 ; SSANNE
++	dw ProgStr467, ProgStr317
++ProgEnt10:
++	db PROG_EVENT
++	dw EVENT_BEAT_SS_ANNE_8_TRAINER_1
++	db 42, 41 ; SSANNE
++	dw ProgStr467, ProgStr317
++ProgEnt11:
++	db PROG_EVENT
++	dw EVENT_BEAT_SS_ANNE_8_TRAINER_2
++	db 42, 41 ; SSANNE
++	dw ProgStr457, ProgStr317
++ProgEnt12:
++	db PROG_EVENT
++	dw EVENT_BEAT_SS_ANNE_8_TRAINER_3
++	db 42, 41 ; SSANNE
++	dw ProgStr458, ProgStr317
++ProgEnt25:
++	db PROG_SSANNE2F
++	dw 2
++	db 42, 42 ; SSANNE
++	dw ProgStr454, ProgStr468
++ProgEnt13:
++	db PROG_EVENT
++	dw EVENT_BEAT_SS_ANNE_9_TRAINER_0
++	db 42, 43 ; SSANNE
++	dw ProgStr467, ProgStr319
++ProgEnt14:
++	db PROG_EVENT
++	dw EVENT_BEAT_SS_ANNE_9_TRAINER_1
++	db 42, 43 ; SSANNE
++	dw ProgStr469, ProgStr319
++ProgEnt15:
++	db PROG_EVENT
++	dw EVENT_BEAT_SS_ANNE_9_TRAINER_2
++	db 42, 43 ; SSANNE
++	dw ProgStr467, ProgStr319
++ProgEnt16:
++	db PROG_EVENT
++	dw EVENT_BEAT_SS_ANNE_9_TRAINER_3
++	db 42, 43 ; SSANNE
++	dw ProgStr458, ProgStr319
++ProgEnt23:
++	db PROG_EVENT
++	dw EVENT_BEAT_SS_ANNE_5_TRAINER_0
++	db 42, 45 ; SSANNE
++	dw ProgStr470, ProgStr471
++ProgEnt24:
++	db PROG_EVENT
++	dw EVENT_BEAT_SS_ANNE_5_TRAINER_1
++	db 42, 45 ; SSANNE
++	dw ProgStr470, ProgStr471
++ProgEnt17:
++	db PROG_EVENT
++	dw EVENT_BEAT_SS_ANNE_10_TRAINER_0
++	db 42, 47 ; SSANNE
++	dw ProgStr470, ProgStr321
++ProgEnt18:
++	db PROG_EVENT
++	dw EVENT_BEAT_SS_ANNE_10_TRAINER_1
++	db 42, 47 ; SSANNE
++	dw ProgStr470, ProgStr321
++ProgEnt19:
++	db PROG_EVENT
++	dw EVENT_BEAT_SS_ANNE_10_TRAINER_2
++	db 42, 47 ; SSANNE
++	dw ProgStr470, ProgStr321
++ProgEnt20:
++	db PROG_EVENT
++	dw EVENT_BEAT_SS_ANNE_10_TRAINER_3
++	db 42, 47 ; SSANNE
++	dw ProgStr470, ProgStr321
++ProgEnt21:
++	db PROG_EVENT
++	dw EVENT_BEAT_SS_ANNE_10_TRAINER_4
++	db 42, 47 ; SSANNE
++	dw ProgStr470, ProgStr321
++ProgEnt22:
++	db PROG_EVENT
++	dw EVENT_BEAT_SS_ANNE_10_TRAINER_5
++	db 42, 47 ; SSANNE
++	dw ProgStr469, ProgStr321
++	db PROG_EVENT
++	dw EVENT_BEAT_VERMILION_GYM_TRAINER_0
++	db 45, 50 ; CUT
++	dw ProgStr467, ProgStr18
++	db PROG_EVENT
++	dw EVENT_BEAT_VERMILION_GYM_TRAINER_1
++	db 45, 50 ; CUT
++	dw ProgStr472, ProgStr18
++	db PROG_EVENT
++	dw EVENT_BEAT_VERMILION_GYM_TRAINER_2
++	db 45, 50 ; CUT
++	dw ProgStr470, ProgStr18
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_9_TRAINER_0
++	db 45, 57 ; CUT
++	dw ProgStr462, ProgStr326
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_9_TRAINER_1
++	db 45, 57 ; CUT
++	dw ProgStr456, ProgStr326
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_9_TRAINER_2
++	db 45, 57 ; CUT
++	dw ProgStr456, ProgStr326
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_9_TRAINER_3
++	db 45, 57 ; CUT
++	dw ProgStr462, ProgStr326
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_9_TRAINER_4
++	db 45, 57 ; CUT
++	dw ProgStr459, ProgStr326
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_9_TRAINER_5
++	db 45, 57 ; CUT
++	dw ProgStr459, ProgStr326
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_9_TRAINER_6
++	db 45, 57 ; CUT
++	dw ProgStr455, ProgStr326
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_9_TRAINER_7
++	db 45, 57 ; CUT
++	dw ProgStr459, ProgStr326
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_9_TRAINER_8
++	db 45, 57 ; CUT
++	dw ProgStr455, ProgStr326
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_10_TRAINER_1
++	db 45, 58 ; CUT
++	dw ProgStr459, ProgStr221
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_10_TRAINER_2
++	db 45, 58 ; CUT
++	dw ProgStr473, ProgStr221
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_10_TRAINER_3
++	db 45, 58 ; CUT
++	dw ProgStr462, ProgStr221
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_10_TRAINER_4
++	db 45, 58 ; CUT
++	dw ProgStr459, ProgStr221
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_10_TRAINER_5
++	db 45, 58 ; CUT
++	dw ProgStr462, ProgStr221
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCK_TUNNEL_1_TRAINER_0
++	db 45, 60 ; CUT
++	dw ProgStr459, ProgStr167
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCK_TUNNEL_1_TRAINER_1
++	db 45, 60 ; CUT
++	dw ProgStr459, ProgStr167
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCK_TUNNEL_1_TRAINER_2
++	db 45, 60 ; CUT
++	dw ProgStr459, ProgStr167
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCK_TUNNEL_1_TRAINER_3
++	db 45, 60 ; CUT
++	dw ProgStr473, ProgStr167
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCK_TUNNEL_1_TRAINER_4
++	db 45, 60 ; CUT
++	dw ProgStr462, ProgStr167
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCK_TUNNEL_1_TRAINER_5
++	db 45, 60 ; CUT
++	dw ProgStr462, ProgStr167
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCK_TUNNEL_1_TRAINER_6
++	db 45, 60 ; CUT
++	dw ProgStr462, ProgStr167
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCK_TUNNEL_2_TRAINER_0
++	db 45, 61 ; CUT
++	dw ProgStr462, ProgStr474
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCK_TUNNEL_2_TRAINER_1
++	db 45, 61 ; CUT
++	dw ProgStr459, ProgStr474
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCK_TUNNEL_2_TRAINER_2
++	db 45, 61 ; CUT
++	dw ProgStr473, ProgStr474
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCK_TUNNEL_2_TRAINER_3
++	db 45, 61 ; CUT
++	dw ProgStr473, ProgStr474
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCK_TUNNEL_2_TRAINER_4
++	db 45, 61 ; CUT
++	dw ProgStr459, ProgStr474
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCK_TUNNEL_2_TRAINER_5
++	db 45, 61 ; CUT
++	dw ProgStr462, ProgStr474
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCK_TUNNEL_2_TRAINER_6
++	db 45, 61 ; CUT
++	dw ProgStr459, ProgStr474
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCK_TUNNEL_2_TRAINER_7
++	db 45, 61 ; CUT
++	dw ProgStr473, ProgStr474
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMONTOWER_3_TRAINER_0
++	db 45, 66 ; CUT
++	dw ProgStr475, ProgStr209
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMONTOWER_3_TRAINER_1
++	db 45, 66 ; CUT
++	dw ProgStr475, ProgStr209
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMONTOWER_3_TRAINER_2
++	db 45, 66 ; CUT
++	dw ProgStr475, ProgStr209
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMONTOWER_4_TRAINER_0
++	db 45, 67 ; CUT
++	dw ProgStr475, ProgStr328
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMONTOWER_4_TRAINER_1
++	db 45, 67 ; CUT
++	dw ProgStr475, ProgStr328
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMONTOWER_4_TRAINER_2
++	db 45, 67 ; CUT
++	dw ProgStr475, ProgStr328
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMONTOWER_5_TRAINER_0
++	db 45, 68 ; CUT
++	dw ProgStr475, ProgStr331
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMONTOWER_5_TRAINER_1
++	db 45, 68 ; CUT
++	dw ProgStr475, ProgStr331
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMONTOWER_5_TRAINER_2
++	db 45, 68 ; CUT
++	dw ProgStr475, ProgStr331
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMONTOWER_5_TRAINER_3
++	db 45, 68 ; CUT
++	dw ProgStr475, ProgStr331
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_8_TRAINER_0
++	db 45, 71 ; CUT
++	dw ProgStr460, ProgStr151
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_8_TRAINER_1
++	db 45, 71 ; CUT
++	dw ProgStr465, ProgStr151
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_8_TRAINER_2
++	db 45, 71 ; CUT
++	dw ProgStr460, ProgStr151
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_8_TRAINER_3
++	db 45, 71 ; CUT
++	dw ProgStr458, ProgStr151
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_8_TRAINER_4
++	db 45, 71 ; CUT
++	dw ProgStr460, ProgStr151
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_8_TRAINER_5
++	db 45, 71 ; CUT
++	dw ProgStr458, ProgStr151
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_8_TRAINER_6
++	db 45, 71 ; CUT
++	dw ProgStr458, ProgStr151
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_8_TRAINER_7
++	db 45, 71 ; CUT
++	dw ProgStr465, ProgStr151
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_8_TRAINER_8
++	db 45, 71 ; CUT
++	dw ProgStr458, ProgStr151
++	db PROG_EVENT
++	dw EVENT_BEAT_CELADON_GYM_TRAINER_0
++	db 45, 82 ; CUT
++	dw ProgStr458, ProgStr21
++	db PROG_EVENT
++	dw EVENT_BEAT_CELADON_GYM_TRAINER_1
++	db 45, 82 ; CUT
++	dw ProgStr476, ProgStr21
++	db PROG_EVENT
++	dw EVENT_BEAT_CELADON_GYM_TRAINER_2
++	db 45, 82 ; CUT
++	dw ProgStr462, ProgStr21
++	db PROG_EVENT
++	dw EVENT_BEAT_CELADON_GYM_TRAINER_3
++	db 45, 82 ; CUT
++	dw ProgStr476, ProgStr21
++	db PROG_EVENT
++	dw EVENT_BEAT_CELADON_GYM_TRAINER_4
++	db 45, 82 ; CUT
++	dw ProgStr458, ProgStr21
++	db PROG_EVENT
++	dw EVENT_BEAT_CELADON_GYM_TRAINER_5
++	db 45, 82 ; CUT
++	dw ProgStr476, ProgStr21
++	db PROG_EVENT
++	dw EVENT_BEAT_CELADON_GYM_TRAINER_6
++	db 45, 82 ; CUT
++	dw ProgStr477, ProgStr21
++	db PROG_TOGGLE
++	dw TOGGLE_GAME_CORNER_ROCKET
++	db 45, 83 ; CUT
++	dw ProgStr461, ProgStr424
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCKET_HIDEOUT_1_TRAINER_0
++	db 45, 84 ; CUT
++	dw ProgStr461, ProgStr332
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCKET_HIDEOUT_1_TRAINER_1
++	db 45, 84 ; CUT
++	dw ProgStr461, ProgStr332
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCKET_HIDEOUT_1_TRAINER_2
++	db 45, 84 ; CUT
++	dw ProgStr461, ProgStr332
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCKET_HIDEOUT_1_TRAINER_3
++	db 45, 84 ; CUT
++	dw ProgStr461, ProgStr332
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCKET_HIDEOUT_1_TRAINER_4
++	db 45, 84 ; CUT
++	dw ProgStr461, ProgStr332
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCKET_HIDEOUT_2_TRAINER_0
++	db 45, 85 ; CUT
++	dw ProgStr461, ProgStr334
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCKET_HIDEOUT_3_TRAINER_0
++	db 45, 86 ; CUT
++	dw ProgStr461, ProgStr338
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCKET_HIDEOUT_3_TRAINER_1
++	db 45, 86 ; CUT
++	dw ProgStr461, ProgStr338
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCKET_HIDEOUT_4_TRAINER_0
++	db 45, 87 ; CUT
++	dw ProgStr461, ProgStr23
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCKET_HIDEOUT_4_TRAINER_1
++	db 45, 87 ; CUT
++	dw ProgStr461, ProgStr23
++	db PROG_EVENT
++	dw EVENT_BEAT_ROCKET_HIDEOUT_4_TRAINER_2
++	db 45, 87 ; CUT
++	dw ProgStr461, ProgStr23
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMONTOWER_6_TRAINER_0
++	db 69, 69 ; S_HIDEOUT
++	dw ProgStr475, ProgStr26
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMONTOWER_6_TRAINER_1
++	db 69, 69 ; S_HIDEOUT
++	dw ProgStr475, ProgStr26
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMONTOWER_6_TRAINER_2
++	db 69, 69 ; S_HIDEOUT
++	dw ProgStr475, ProgStr26
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMONTOWER_7_TRAINER_0
++	db 69, 70 ; S_HIDEOUT
++	dw ProgStr461, ProgStr28
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMONTOWER_7_TRAINER_1
++	db 69, 70 ; S_HIDEOUT
++	dw ProgStr461, ProgStr28
++	db PROG_EVENT
++	dw EVENT_BEAT_POKEMONTOWER_7_TRAINER_2
++	db 69, 70 ; S_HIDEOUT
++	dw ProgStr461, ProgStr28
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_12_TRAINER_0
++	db 73, 88 ; S_FLUTE
++	dw ProgStr469, ProgStr130
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_12_TRAINER_1
++	db 73, 88 ; S_FLUTE
++	dw ProgStr469, ProgStr130
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_12_TRAINER_2
++	db 73, 88 ; S_FLUTE
++	dw ProgStr456, ProgStr130
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_12_TRAINER_3
++	db 73, 88 ; S_FLUTE
++	dw ProgStr472, ProgStr130
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_12_TRAINER_4
++	db 73, 88 ; S_FLUTE
++	dw ProgStr469, ProgStr130
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_12_TRAINER_5
++	db 73, 88 ; S_FLUTE
++	dw ProgStr469, ProgStr130
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_12_TRAINER_6
++	db 73, 88 ; S_FLUTE
++	dw ProgStr469, ProgStr130
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_13_TRAINER_0
++	db 73, 91 ; S_FLUTE
++	dw ProgStr478, ProgStr269
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_13_TRAINER_1
++	db 73, 91 ; S_FLUTE
++	dw ProgStr462, ProgStr269
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_13_TRAINER_2
++	db 73, 91 ; S_FLUTE
++	dw ProgStr462, ProgStr269
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_13_TRAINER_3
++	db 73, 91 ; S_FLUTE
++	dw ProgStr462, ProgStr269
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_13_TRAINER_4
++	db 73, 91 ; S_FLUTE
++	dw ProgStr462, ProgStr269
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_13_TRAINER_5
++	db 73, 91 ; S_FLUTE
++	dw ProgStr478, ProgStr269
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_13_TRAINER_6
++	db 73, 91 ; S_FLUTE
++	dw ProgStr476, ProgStr269
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_13_TRAINER_7
++	db 73, 91 ; S_FLUTE
++	dw ProgStr476, ProgStr269
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_13_TRAINER_8
++	db 73, 91 ; S_FLUTE
++	dw ProgStr479, ProgStr269
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_13_TRAINER_9
++	db 73, 91 ; S_FLUTE
++	dw ProgStr478, ProgStr269
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_14_TRAINER_0
++	db 73, 92 ; S_FLUTE
++	dw ProgStr478, ProgStr84
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_14_TRAINER_1
++	db 73, 92 ; S_FLUTE
++	dw ProgStr478, ProgStr84
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_14_TRAINER_2
++	db 73, 92 ; S_FLUTE
++	dw ProgStr478, ProgStr84
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_14_TRAINER_3
++	db 73, 92 ; S_FLUTE
++	dw ProgStr478, ProgStr84
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_14_TRAINER_4
++	db 73, 92 ; S_FLUTE
++	dw ProgStr478, ProgStr84
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_14_TRAINER_5
++	db 73, 92 ; S_FLUTE
++	dw ProgStr478, ProgStr84
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_14_TRAINER_6
++	db 73, 92 ; S_FLUTE
++	dw ProgStr479, ProgStr84
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_14_TRAINER_7
++	db 73, 92 ; S_FLUTE
++	dw ProgStr479, ProgStr84
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_14_TRAINER_8
++	db 73, 92 ; S_FLUTE
++	dw ProgStr479, ProgStr84
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_14_TRAINER_9
++	db 73, 92 ; S_FLUTE
++	dw ProgStr479, ProgStr84
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_15_TRAINER_0
++	db 73, 93 ; S_FLUTE
++	dw ProgStr462, ProgStr345
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_15_TRAINER_1
++	db 73, 93 ; S_FLUTE
++	dw ProgStr462, ProgStr345
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_15_TRAINER_2
++	db 73, 93 ; S_FLUTE
++	dw ProgStr478, ProgStr345
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_15_TRAINER_3
++	db 73, 93 ; S_FLUTE
++	dw ProgStr478, ProgStr345
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_15_TRAINER_4
++	db 73, 93 ; S_FLUTE
++	dw ProgStr476, ProgStr345
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_15_TRAINER_5
++	db 73, 93 ; S_FLUTE
++	dw ProgStr476, ProgStr345
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_15_TRAINER_6
++	db 73, 93 ; S_FLUTE
++	dw ProgStr479, ProgStr345
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_15_TRAINER_7
++	db 73, 93 ; S_FLUTE
++	dw ProgStr479, ProgStr345
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_15_TRAINER_8
++	db 73, 93 ; S_FLUTE
++	dw ProgStr462, ProgStr345
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_15_TRAINER_9
++	db 73, 93 ; S_FLUTE
++	dw ProgStr462, ProgStr345
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_16_TRAINER_0
++	db 73, 95 ; S_FLUTE
++	dw ProgStr479, ProgStr89
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_16_TRAINER_1
++	db 73, 95 ; S_FLUTE
++	dw ProgStr480, ProgStr89
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_16_TRAINER_2
++	db 73, 95 ; S_FLUTE
++	dw ProgStr480, ProgStr89
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_16_TRAINER_3
++	db 73, 95 ; S_FLUTE
++	dw ProgStr479, ProgStr89
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_16_TRAINER_4
++	db 73, 95 ; S_FLUTE
++	dw ProgStr480, ProgStr89
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_16_TRAINER_5
++	db 73, 95 ; S_FLUTE
++	dw ProgStr479, ProgStr89
++	db PROG_EVENT
++	dw EVENT_BEAT_FUCHSIA_GYM_TRAINER_0
++	db 73, 102 ; S_FLUTE
++	dw ProgStr481, ProgStr34
++	db PROG_EVENT
++	dw EVENT_BEAT_FUCHSIA_GYM_TRAINER_1
++	db 73, 102 ; S_FLUTE
++	dw ProgStr481, ProgStr34
++	db PROG_EVENT
++	dw EVENT_BEAT_FUCHSIA_GYM_TRAINER_2
++	db 73, 102 ; S_FLUTE
++	dw ProgStr481, ProgStr34
++	db PROG_EVENT
++	dw EVENT_BEAT_FUCHSIA_GYM_TRAINER_3
++	db 73, 102 ; S_FLUTE
++	dw ProgStr482, ProgStr34
++	db PROG_EVENT
++	dw EVENT_BEAT_FUCHSIA_GYM_TRAINER_4
++	db 73, 102 ; S_FLUTE
++	dw ProgStr482, ProgStr34
++	db PROG_EVENT
++	dw EVENT_BEAT_FUCHSIA_GYM_TRAINER_5
++	db 73, 102 ; S_FLUTE
++	dw ProgStr481, ProgStr34
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_17_TRAINER_0
++	db 80, 97 ; CYCLING
++	dw ProgStr480, ProgStr92
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_17_TRAINER_1
++	db 80, 97 ; CYCLING
++	dw ProgStr480, ProgStr92
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_17_TRAINER_2
++	db 80, 97 ; CYCLING
++	dw ProgStr479, ProgStr92
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_17_TRAINER_3
++	db 80, 97 ; CYCLING
++	dw ProgStr479, ProgStr92
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_17_TRAINER_4
++	db 80, 97 ; CYCLING
++	dw ProgStr479, ProgStr92
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_17_TRAINER_5
++	db 80, 97 ; CYCLING
++	dw ProgStr480, ProgStr92
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_17_TRAINER_6
++	db 80, 97 ; CYCLING
++	dw ProgStr480, ProgStr92
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_17_TRAINER_7
++	db 80, 97 ; CYCLING
++	dw ProgStr480, ProgStr92
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_17_TRAINER_8
++	db 80, 97 ; CYCLING
++	dw ProgStr479, ProgStr92
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_17_TRAINER_9
++	db 80, 97 ; CYCLING
++	dw ProgStr479, ProgStr92
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_18_TRAINER_0
++	db 80, 98 ; CYCLING
++	dw ProgStr478, ProgStr483
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_18_TRAINER_1
++	db 80, 98 ; CYCLING
++	dw ProgStr478, ProgStr483
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_18_TRAINER_2
++	db 80, 98 ; CYCLING
++	dw ProgStr478, ProgStr483
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_19_TRAINER_0
++	db 100, 126 ; SURF
++	dw ProgStr463, ProgStr484
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_19_TRAINER_1
++	db 100, 126 ; SURF
++	dw ProgStr463, ProgStr484
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_19_TRAINER_2
++	db 100, 126 ; SURF
++	dw ProgStr463, ProgStr484
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_19_TRAINER_3
++	db 100, 126 ; SURF
++	dw ProgStr463, ProgStr484
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_19_TRAINER_4
++	db 100, 126 ; SURF
++	dw ProgStr463, ProgStr484
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_19_TRAINER_5
++	db 100, 126 ; SURF
++	dw ProgStr463, ProgStr484
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_19_TRAINER_6
++	db 100, 126 ; SURF
++	dw ProgStr476, ProgStr484
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_19_TRAINER_7
++	db 100, 126 ; SURF
++	dw ProgStr476, ProgStr484
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_19_TRAINER_8
++	db 100, 126 ; SURF
++	dw ProgStr463, ProgStr484
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_19_TRAINER_9
++	db 100, 126 ; SURF
++	dw ProgStr476, ProgStr484
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_20_TRAINER_0
++	db 100, 127 ; SURF
++	dw ProgStr463, ProgStr485
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_20_TRAINER_1
++	db 100, 127 ; SURF
++	dw ProgStr476, ProgStr485
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_20_TRAINER_2
++	db 100, 127 ; SURF
++	dw ProgStr476, ProgStr485
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_20_TRAINER_3
++	db 100, 127 ; SURF
++	dw ProgStr462, ProgStr485
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_20_TRAINER_4
++	db 100, 127 ; SURF
++	dw ProgStr463, ProgStr485
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_20_TRAINER_5
++	db 100, 127 ; SURF
++	dw ProgStr463, ProgStr485
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_20_TRAINER_6
++	db 100, 127 ; SURF
++	dw ProgStr478, ProgStr485
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_20_TRAINER_7
++	db 100, 127 ; SURF
++	dw ProgStr476, ProgStr485
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_20_TRAINER_8
++	db 100, 127 ; SURF
++	dw ProgStr462, ProgStr485
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_20_TRAINER_9
++	db 100, 127 ; SURF
++	dw ProgStr476, ProgStr485
++	db PROG_EVENT
++	dw EVENT_BEAT_MANSION_1_TRAINER_0
++	db 100, 134 ; SURF
++	dw ProgStr486, ProgStr185
++	db PROG_EVENT
++	dw EVENT_BEAT_MANSION_2_TRAINER_0
++	db 100, 135 ; SURF
++	dw ProgStr487, ProgStr357
++	db PROG_EVENT
++	dw EVENT_BEAT_MANSION_3_TRAINER_0
++	db 100, 136 ; SURF
++	dw ProgStr487, ProgStr358
++	db PROG_EVENT
++	dw EVENT_BEAT_MANSION_3_TRAINER_1
++	db 100, 136 ; SURF
++	dw ProgStr486, ProgStr358
++	db PROG_EVENT
++	dw EVENT_BEAT_MANSION_4_TRAINER_0
++	db 100, 137 ; SURF
++	dw ProgStr487, ProgStr359
++	db PROG_EVENT
++	dw EVENT_BEAT_MANSION_4_TRAINER_1
++	db 100, 137 ; SURF
++	dw ProgStr486, ProgStr359
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_21_TRAINER_0
++	db 100, 143 ; SURF
++	dw ProgStr469, ProgStr241
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_21_TRAINER_1
++	db 100, 143 ; SURF
++	dw ProgStr469, ProgStr241
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_21_TRAINER_2
++	db 100, 143 ; SURF
++	dw ProgStr463, ProgStr241
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_21_TRAINER_3
++	db 100, 143 ; SURF
++	dw ProgStr480, ProgStr241
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_21_TRAINER_4
++	db 100, 143 ; SURF
++	dw ProgStr463, ProgStr241
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_21_TRAINER_5
++	db 100, 143 ; SURF
++	dw ProgStr463, ProgStr241
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_21_TRAINER_6
++	db 100, 143 ; SURF
++	dw ProgStr463, ProgStr241
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_21_TRAINER_7
++	db 100, 143 ; SURF
++	dw ProgStr469, ProgStr241
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_21_TRAINER_8
++	db 100, 143 ; SURF
++	dw ProgStr469, ProgStr241
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE_10_TRAINER_0
++	db 102, 58 ; (CUT+SURF)
++	dw ProgStr473, ProgStr221
++	db PROG_EVENT
++	dw EVENT_BEAT_FIGHTING_DOJO_TRAINER_0
++	db 124, 113 ; S_DRINK
++	dw ProgStr488, ProgStr489
++	db PROG_EVENT
++	dw EVENT_BEAT_FIGHTING_DOJO_TRAINER_1
++	db 124, 113 ; S_DRINK
++	dw ProgStr488, ProgStr489
++	db PROG_EVENT
++	dw EVENT_BEAT_FIGHTING_DOJO_TRAINER_2
++	db 124, 113 ; S_DRINK
++	dw ProgStr488, ProgStr489
++	db PROG_EVENT
++	dw EVENT_BEAT_FIGHTING_DOJO_TRAINER_3
++	db 124, 113 ; S_DRINK
++	dw ProgStr488, ProgStr489
++	db PROG_EVENT
++	dw EVENT_BEAT_KARATE_MASTER
++	db 124, 113 ; S_DRINK
++	dw ProgStr490, ProgStr489
++ProgEnt30:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_2F_TRAINER_0
++	db 126, 115 ; SILPHTRAINERS
++	dw ProgStr486, ProgStr447
++ProgEnt31:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_2F_TRAINER_1
++	db 126, 115 ; SILPHTRAINERS
++	dw ProgStr486, ProgStr447
++ProgEnt32:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_2F_TRAINER_2
++	db 126, 115 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr447
++ProgEnt33:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_2F_TRAINER_3
++	db 126, 115 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr447
++ProgEnt34:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_3F_TRAINER_0
++	db 126, 116 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr365
++ProgEnt35:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_3F_TRAINER_1
++	db 126, 116 ; SILPHTRAINERS
++	dw ProgStr486, ProgStr365
++ProgEnt36:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_4F_TRAINER_0
++	db 126, 117 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr367
++ProgEnt37:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_4F_TRAINER_1
++	db 126, 117 ; SILPHTRAINERS
++	dw ProgStr486, ProgStr367
++ProgEnt38:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_4F_TRAINER_2
++	db 126, 117 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr367
++ProgEnt39:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_5F_TRAINER_0
++	db 126, 118 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr369
++ProgEnt40:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_5F_TRAINER_1
++	db 126, 118 ; SILPHTRAINERS
++	dw ProgStr486, ProgStr369
++ProgEnt41:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_5F_TRAINER_2
++	db 126, 118 ; SILPHTRAINERS
++	dw ProgStr481, ProgStr369
++ProgEnt42:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_5F_TRAINER_3
++	db 126, 118 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr369
++ProgEnt43:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_6F_TRAINER_0
++	db 126, 119 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr371
++ProgEnt44:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_6F_TRAINER_1
++	db 126, 119 ; SILPHTRAINERS
++	dw ProgStr486, ProgStr371
++ProgEnt45:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_6F_TRAINER_2
++	db 126, 119 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr371
++ProgEnt46:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_7F_TRAINER_0
++	db 126, 120 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr41
++ProgEnt47:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_7F_TRAINER_1
++	db 126, 120 ; SILPHTRAINERS
++	dw ProgStr486, ProgStr41
++ProgEnt48:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_7F_TRAINER_2
++	db 126, 120 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr41
++ProgEnt49:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_7F_TRAINER_3
++	db 126, 120 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr41
++ProgEnt50:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_8F_TRAINER_0
++	db 126, 121 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr491
++ProgEnt51:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_8F_TRAINER_1
++	db 126, 121 ; SILPHTRAINERS
++	dw ProgStr486, ProgStr491
++ProgEnt52:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_8F_TRAINER_2
++	db 126, 121 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr491
++ProgEnt53:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_9F_TRAINER_0
++	db 126, 122 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr400
++ProgEnt54:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_9F_TRAINER_1
++	db 126, 122 ; SILPHTRAINERS
++	dw ProgStr486, ProgStr400
++ProgEnt55:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_9F_TRAINER_2
++	db 126, 122 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr400
++ProgEnt26:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_10F_TRAINER_0
++	db 126, 123 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr374
++ProgEnt27:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_10F_TRAINER_1
++	db 126, 123 ; SILPHTRAINERS
++	dw ProgStr486, ProgStr374
++ProgEnt28:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_11F_TRAINER_0
++	db 126, 124 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr42
++ProgEnt29:
++	db PROG_EVENT
++	dw EVENT_BEAT_SILPH_CO_11F_TRAINER_1
++	db 126, 124 ; SILPHTRAINERS
++	dw ProgStr461, ProgStr42
++	db PROG_EVENT
++	dw EVENT_BEAT_SAFFRON_GYM_TRAINER_0
++	db 128, 125 ; S_SILPH
++	dw ProgStr475, ProgStr44
++	db PROG_EVENT
++	dw EVENT_BEAT_SAFFRON_GYM_TRAINER_1
++	db 128, 125 ; S_SILPH
++	dw ProgStr492, ProgStr44
++	db PROG_EVENT
++	dw EVENT_BEAT_SAFFRON_GYM_TRAINER_2
++	db 128, 125 ; S_SILPH
++	dw ProgStr475, ProgStr44
++	db PROG_EVENT
++	dw EVENT_BEAT_SAFFRON_GYM_TRAINER_3
++	db 128, 125 ; S_SILPH
++	dw ProgStr492, ProgStr44
++	db PROG_EVENT
++	dw EVENT_BEAT_SAFFRON_GYM_TRAINER_4
++	db 128, 125 ; S_SILPH
++	dw ProgStr475, ProgStr44
++	db PROG_EVENT
++	dw EVENT_BEAT_SAFFRON_GYM_TRAINER_5
++	db 128, 125 ; S_SILPH
++	dw ProgStr492, ProgStr44
++	db PROG_EVENT
++	dw EVENT_BEAT_SAFFRON_GYM_TRAINER_6
++	db 128, 125 ; S_SILPH
++	dw ProgStr492, ProgStr44
++	db PROG_EVENT
++	dw EVENT_BEAT_VIRIDIAN_GYM_TRAINER_0
++	db 129, 145 ; S_SABRINA
++	dw ProgStr493, ProgStr47
++	db PROG_EVENT
++	dw EVENT_BEAT_VIRIDIAN_GYM_TRAINER_1
++	db 129, 145 ; S_SABRINA
++	dw ProgStr488, ProgStr47
++	db PROG_EVENT
++	dw EVENT_BEAT_VIRIDIAN_GYM_TRAINER_2
++	db 129, 145 ; S_SABRINA
++	dw ProgStr482, ProgStr47
++	db PROG_EVENT
++	dw EVENT_BEAT_VIRIDIAN_GYM_TRAINER_3
++	db 129, 145 ; S_SABRINA
++	dw ProgStr488, ProgStr47
++	db PROG_EVENT
++	dw EVENT_BEAT_VIRIDIAN_GYM_TRAINER_4
++	db 129, 145 ; S_SABRINA
++	dw ProgStr493, ProgStr47
++	db PROG_EVENT
++	dw EVENT_BEAT_VIRIDIAN_GYM_TRAINER_5
++	db 129, 145 ; S_SABRINA
++	dw ProgStr488, ProgStr47
++	db PROG_EVENT
++	dw EVENT_BEAT_VIRIDIAN_GYM_TRAINER_6
++	db 129, 145 ; S_SABRINA
++	dw ProgStr482, ProgStr47
++	db PROG_EVENT
++	dw EVENT_BEAT_VIRIDIAN_GYM_TRAINER_7
++	db 129, 145 ; S_SABRINA
++	dw ProgStr493, ProgStr47
++	db PROG_EVENT
++	dw EVENT_BEAT_CINNABAR_GYM_TRAINER_0
++	db 130, 142 ; SECRETKEY
++	dw ProgStr460, ProgStr46
++	db PROG_EVENT
++	dw EVENT_BEAT_CINNABAR_GYM_TRAINER_1
++	db 130, 142 ; SECRETKEY
++	dw ProgStr487, ProgStr46
++	db PROG_EVENT
++	dw EVENT_BEAT_CINNABAR_GYM_TRAINER_2
++	db 130, 142 ; SECRETKEY
++	dw ProgStr460, ProgStr46
++	db PROG_EVENT
++	dw EVENT_BEAT_CINNABAR_GYM_TRAINER_3
++	db 130, 142 ; SECRETKEY
++	dw ProgStr487, ProgStr46
++	db PROG_EVENT
++	dw EVENT_BEAT_CINNABAR_GYM_TRAINER_4
++	db 130, 142 ; SECRETKEY
++	dw ProgStr460, ProgStr46
++	db PROG_EVENT
++	dw EVENT_BEAT_CINNABAR_GYM_TRAINER_5
++	db 130, 142 ; SECRETKEY
++	dw ProgStr487, ProgStr46
++	db PROG_EVENT
++	dw EVENT_BEAT_CINNABAR_GYM_TRAINER_6
++	db 130, 142 ; SECRETKEY
++	dw ProgStr460, ProgStr46
++	db PROG_EVENT
++	dw EVENT_BEAT_VICTORY_ROAD_1_TRAINER_0
++	db 137, 148 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr477, ProgStr169
++	db PROG_EVENT
++	dw EVENT_BEAT_VICTORY_ROAD_1_TRAINER_1
++	db 137, 148 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr493, ProgStr169
++	db PROG_EVENT
++	dw EVENT_BEAT_VICTORY_ROAD_2_TRAINER_0
++	db 137, 149 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr488, ProgStr294
++	db PROG_EVENT
++	dw EVENT_BEAT_VICTORY_ROAD_2_TRAINER_1
++	db 137, 149 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr481, ProgStr294
++	db PROG_EVENT
++	dw EVENT_BEAT_VICTORY_ROAD_2_TRAINER_2
++	db 137, 149 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr482, ProgStr294
++	db PROG_EVENT
++	dw EVENT_BEAT_VICTORY_ROAD_2_TRAINER_3
++	db 137, 149 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr473, ProgStr294
++	db PROG_EVENT
++	dw EVENT_BEAT_VICTORY_ROAD_2_TRAINER_4
++	db 137, 149 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr481, ProgStr294
++	db PROG_EVENT
++	dw EVENT_BEAT_VICTORY_ROAD_3_TRAINER_0
++	db 137, 150 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr493, ProgStr380
++	db PROG_EVENT
++	dw EVENT_BEAT_VICTORY_ROAD_3_TRAINER_1
++	db 137, 150 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr477, ProgStr380
++	db PROG_EVENT
++	dw EVENT_BEAT_VICTORY_ROAD_3_TRAINER_2
++	db 137, 150 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr493, ProgStr380
++	db PROG_EVENT
++	dw EVENT_BEAT_VICTORY_ROAD_3_TRAINER_3
++	db 137, 150 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr477, ProgStr380
++ProgCatEntries6:
++	db PROG_TRADE
++	dw 9
++	db 34, 31 ; (DEX_NIDORAN_M+S_MTMOON)
++	dw ProgStr494, ProgStr495
++	db PROG_TRADE
++	dw 4
++	db 35, 38 ; (DEX_SPEAROW+S_MTMOON)
++	dw ProgStr496, ProgStr397
++	db PROG_TRADE
++	dw 1
++	db 40, 10 ; DEX_ABRA
++	dw ProgStr497, ProgStr498
++	db PROG_TRADE
++	dw 0
++	db 76, 52 ; DEX_NIDORINO
++	dw ProgStr499, ProgStr426
++	db PROG_TRADE
++	dw 6
++	db 94, 24 ; DEX_POLIWHIRL
++	dw ProgStr500, ProgStr10
++	db PROG_TRADE
++	dw 7
++	db 103, 139 ; (DEX_RAICHU+SURF)
++	dw ProgStr501, ProgStr442
++	db PROG_TRADE
++	dw 8
++	db 104, 139 ; (DEX_VENONAT+SURF)
++	dw ProgStr502, ProgStr442
++	db PROG_TRADE
++	dw 3
++	db 111, 141 ; (SURF+DEX_PONYTA)
++	dw ProgStr503, ProgStr442
++	db PROG_TRADE
++	dw 5
++	db 123, 99 ; (CYCLING+DEX_SLOWBRO)
++	dw ProgStr504, ProgStr505
++ProgCatEntries7:
++	db PROG_EVENT
++	dw EVENT_BOUGHT_MAGIKARP
++	db 29, 18 ; S_BROCK
++	dw ProgStr506, ProgStr507
++	db PROG_TOGGLE
++	dw TOGGLE_CELADON_MANSION_EEVEE_GIFT
++	db 45, 80 ; CUT
++	dw ProgStr508, ProgStr271
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE12_SNORLAX
++	db 73, 88 ; S_FLUTE
++	dw ProgStr509, ProgStr130
++	db PROG_EVENT
++	dw EVENT_BEAT_ROUTE16_SNORLAX
++	db 73, 95 ; S_FLUTE
++	dw ProgStr509, ProgStr89
++	db PROG_EVENT
++	dw EVENT_BEAT_ZAPDOS
++	db 100, 144 ; SURF
++	dw ProgStr510, ProgStr193
++	db PROG_EVENT
++	dw EVENT_BEAT_POWER_PLANT_VOLTORB_0
++	db 100, 144 ; SURF
++	dw ProgStr511, ProgStr193
++	db PROG_EVENT
++	dw EVENT_BEAT_POWER_PLANT_VOLTORB_1
++	db 100, 144 ; SURF
++	dw ProgStr511, ProgStr193
++	db PROG_EVENT
++	dw EVENT_BEAT_POWER_PLANT_VOLTORB_2
++	db 100, 144 ; SURF
++	dw ProgStr511, ProgStr193
++	db PROG_EVENT
++	dw EVENT_BEAT_POWER_PLANT_VOLTORB_3
++	db 100, 144 ; SURF
++	dw ProgStr512, ProgStr193
++	db PROG_EVENT
++	dw EVENT_BEAT_POWER_PLANT_VOLTORB_4
++	db 100, 144 ; SURF
++	dw ProgStr511, ProgStr193
++	db PROG_EVENT
++	dw EVENT_BEAT_POWER_PLANT_VOLTORB_5
++	db 100, 144 ; SURF
++	dw ProgStr511, ProgStr193
++	db PROG_EVENT
++	dw EVENT_BEAT_POWER_PLANT_VOLTORB_6
++	db 100, 144 ; SURF
++	dw ProgStr512, ProgStr193
++	db PROG_EVENT
++	dw EVENT_BEAT_POWER_PLANT_VOLTORB_7
++	db 100, 144 ; SURF
++	dw ProgStr511, ProgStr193
++	db PROG_DEX | PROG_EITHER
++	dw 137
++	db PROG_DEX
++	dw 139
++	db 105, 141 ; (FOSSIL+SURF)
++	dw ProgStr513, ProgStr514
++	db PROG_DEX
++	dw 141
++	db 109, 141 ; (OLDAMBER+SURF)
++	dw ProgStr515, ProgStr516
++	db PROG_EVENT
++	dw EVENT_BEAT_ARTICUNO
++	db 121, 132 ; (SURF+STRENGTH)
++	dw ProgStr517, ProgStr291
++	db PROG_EVENT | PROG_EITHER
++	dw EVENT_GOT_HITMONLEE
++	db PROG_EVENT
++	dw EVENT_GOT_HITMONCHAN
++	db 124, 113 ; S_DRINK
++	dw ProgStr518, ProgStr489
++	db PROG_FLAGS4
++	dw BIT_GOT_LAPRAS
++	db 124, 120 ; S_DRINK
++	dw ProgStr519, ProgStr41
++	db PROG_EVENT
++	dw EVENT_BEAT_MOLTRES
++	db 137, 149 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr520, ProgStr294
++	db PROG_EVENT
++	dw EVENT_BEAT_MEWTWO
++	db 145, 159 ; S_CHAMPION
++	dw ProgStr521, ProgStr301
++ProgCatEntries8:
++	db PROG_TOWN
++	dw PALLET_TOWN
++	db 0, 0 ; ALWAYS
++	dw ProgStr522, ProgStr523
++	db PROG_TOWN
++	dw VIRIDIAN_CITY
++	db 21, 6 ; S_STARTER
++	dw ProgStr390, ProgStr523
++	db PROG_TOWN
++	dw PEWTER_CITY
++	db 25, 14 ; S_DEX
++	dw ProgStr524, ProgStr523
++	db PROG_TOWN
++	dw CERULEAN_CITY
++	db 33, 23 ; S_MTMOON
++	dw ProgStr10, ProgStr523
++	db PROG_TOWN
++	dw VERMILION_CITY
++	db 33, 35 ; S_MTMOON
++	dw ProgStr397, ProgStr523
++	db PROG_TOWN
++	dw LAVENDER_TOWN
++	db 45, 62 ; CUT
++	dw ProgStr525, ProgStr523
++	db PROG_TOWN
++	dw CELADON_CITY
++	db 45, 76 ; CUT
++	dw ProgStr396, ProgStr523
++	db PROG_TOWN
++	dw FUCHSIA_CITY
++	db 73, 100 ; S_FLUTE
++	dw ProgStr436, ProgStr523
++	db PROG_TOWN
++	dw CINNABAR_ISLAND
++	db 100, 133 ; SURF
++	dw ProgStr526, ProgStr523
++	db PROG_TOWN
++	dw SAFFRON_CITY
++	db 124, 110 ; S_DRINK
++	dw ProgStr527, ProgStr523
++	db PROG_TOWN
++	dw INDIGO_PLATEAU
++	db 137, 151 ; (STRENGTH+S_GIOVANNI)
++	dw ProgStr50, ProgStr523
++
++ProgressWarnings:
++; map, condition, four lines, entries that would be lost (0: none)
++	db OAKS_LAB, 19 ; W_STARTER
++	dw ProgStr528, ProgStr529, ProgStr530, ProgStr531
++	dw 0
++	db PEWTER_GYM, 12 ; W_R22
++	dw ProgStr532, ProgStr533, ProgStr534, ProgStr535
++	dw ProgWarnGroup1
++	db MT_MOON_B2F, 8 ; W_FOSSIL
++	dw ProgStr536, ProgStr537, ProgStr538, ProgStr531
++	dw 0
++	db SS_ANNE_CAPTAINS_ROOM, 11 ; W_NOHM01
++	dw ProgStr539, ProgStr540, ProgStr541, ProgStr542
++	dw ProgWarnGroup3
++	db SS_ANNE_1F, 18 ; W_SSLEAVING
++	dw ProgStr543, ProgStr544, ProgStr545, ProgStr542
++	dw ProgWarnGroup4
++	db ROUTE_12, 14 ; W_SNORLAX12
++	dw ProgStr546, ProgStr547, ProgStr548, ProgStr549
++	dw 0
++	db ROUTE_16, 16 ; W_SNORLAX16
++	dw ProgStr546, ProgStr547, ProgStr548, ProgStr549
++	dw 0
++	db FIGHTING_DOJO, 7 ; W_DOJO
++	dw ProgStr550, ProgStr551, ProgStr552, ProgStr531
++	dw 0
++	db SILPH_CO_11F, 13 ; W_SILPH
++	dw ProgStr553, ProgStr554, ProgStr555, ProgStr556
++	dw ProgWarnGroup8
++	db POWER_PLANT, 20 ; W_ZAPDOS
++	dw ProgStr557, ProgStr558, ProgStr559, ProgStr549
++	dw 0
++	db SEAFOAM_ISLANDS_B4F, 6 ; W_ARTICUNO
++	dw ProgStr560, ProgStr558, ProgStr559, ProgStr549
++	dw 0
++	db VICTORY_ROAD_2F, 10 ; W_MOLTRES
++	dw ProgStr561, ProgStr558, ProgStr559, ProgStr549
++	dw 0
++	db CERULEAN_CAVE_B1F, 9 ; W_MEWTWO
++	dw ProgStr562, ProgStr558, ProgStr559, ProgStr549
++	dw 0
++	db -1 ; end
++ProgWarnGroup1:
++	dw ProgEnt0, 0
++ProgWarnGroup3:
++	dw ProgEnt1, ProgEnt2, ProgEnt3, ProgEnt4, ProgEnt5, ProgEnt6, ProgEnt7, ProgEnt8, ProgEnt9, ProgEnt10, ProgEnt11, ProgEnt12, ProgEnt13, ProgEnt14, ProgEnt15, ProgEnt16, ProgEnt17, ProgEnt18, ProgEnt19, ProgEnt20, ProgEnt21, ProgEnt22, ProgEnt23, ProgEnt24, ProgEnt25, 0
++ProgWarnGroup4:
++	dw ProgEnt1, ProgEnt2, ProgEnt3, ProgEnt4, ProgEnt5, ProgEnt6, ProgEnt7, ProgEnt8, ProgEnt9, ProgEnt10, ProgEnt11, ProgEnt12, ProgEnt13, ProgEnt14, ProgEnt15, ProgEnt16, ProgEnt17, ProgEnt18, ProgEnt19, ProgEnt20, ProgEnt21, ProgEnt22, ProgEnt23, ProgEnt24, ProgEnt25, 0
++ProgWarnGroup8:
++	dw ProgEnt26, ProgEnt27, ProgEnt28, ProgEnt29, ProgEnt30, ProgEnt31, ProgEnt32, ProgEnt33, ProgEnt34, ProgEnt35, ProgEnt36, ProgEnt37, ProgEnt38, ProgEnt39, ProgEnt40, ProgEnt41, ProgEnt42, ProgEnt43, ProgEnt44, ProgEnt45, ProgEnt46, ProgEnt47, ProgEnt48, ProgEnt49, ProgEnt50, ProgEnt51, ProgEnt52, ProgEnt53, ProgEnt54, ProgEnt55, 0
++
++; the two lines of every entry and warning, read through ProgressPlaceString
++SECTION "Progress Strings", ROMX, BANK[$2E]
++
++ProgStr0: db "Choose a POKéMON@"
++ProgStr1: db "OAK'S LAB@"
++ProgStr2: db "Get OAK'S PARCEL@"
++ProgStr3: db "VIRIDIAN MART@"
++ProgStr4: db "Take parcel to OAK@"
++ProgStr5: db "Beat BROCK@"
++ProgStr6: db "PEWTER GYM@"
++ProgStr7: db "Cross MT.MOON@"
++ProgStr8: db "MT.MOON B2F@"
++ProgStr9: db "Beat your rival@"
++ProgStr10: db "CERULEAN CITY@"
++ProgStr11: db "Beat MISTY@"
++ProgStr12: db "CERULEAN GYM@"
++ProgStr13: db "Help BILL@"
++ProgStr14: db "ROUTE 25@"
++ProgStr15: db "Get HM01 CUT@"
++ProgStr16: db "S.S.ANNE CAPTAIN@"
++ProgStr17: db "Beat LT.SURGE@"
++ProgStr18: db "VERMILION GYM@"
++ProgStr19: db "Beat the thief@"
++ProgStr20: db "Beat ERIKA@"
++ProgStr21: db "CELADON GYM@"
++ProgStr22: db "Beat GIOVANNI@"
++ProgStr23: db "ROCKET HIDEOUT B4@"
++ProgStr24: db "POKéMON TOWER 2F@"
++ProgStr25: db "Calm the ghost@"
++ProgStr26: db "POKéMON TOWER 6F@"
++ProgStr27: db "Rescue MR.FUJI@"
++ProgStr28: db "POKéMON TOWER 7F@"
++ProgStr29: db "Get the POKé FLUTE@"
++ProgStr30: db "MR.FUJI'S HOUSE@"
++ProgStr31: db "Wake a SNORLAX@"
++ProgStr32: db "ROUTE 12 or 16@"
++ProgStr33: db "Beat KOGA@"
++ProgStr34: db "FUCHSIA GYM@"
++ProgStr35: db "Get HM03 SURF@"
++ProgStr36: db "SAFARI ZONE@"
++ProgStr37: db "Get HM04 STRENGTH@"
++ProgStr38: db "WARDEN'S HOUSE@"
++ProgStr39: db "Give guard a drink@"
++ProgStr40: db "SAFFRON GATES@"
++ProgStr41: db "SILPH CO.7F@"
++ProgStr42: db "SILPH CO.11F@"
++ProgStr43: db "Beat SABRINA@"
++ProgStr44: db "SAFFRON GYM@"
++ProgStr45: db "Beat BLAINE@"
++ProgStr46: db "CINNABAR GYM@"
++ProgStr47: db "VIRIDIAN GYM@"
++ProgStr48: db "ROUTE 22@"
++ProgStr49: db "Beat LORELEI@"
++ProgStr50: db "INDIGO PLATEAU@"
++ProgStr51: db "Beat BRUNO@"
++ProgStr52: db "Beat AGATHA@"
++ProgStr53: db "Beat LANCE@"
++ProgStr54: db "Become CHAMPION@"
++ProgStr55: db "001 BULBASAUR@"
++ProgStr56: db "Starter or trade@"
++ProgStr57: db "002 IVYSAUR@"
++ProgStr58: db "Evo BULBASAUR 16@"
++ProgStr59: db "003 VENUSAUR@"
++ProgStr60: db "Evolve IVYSAUR 32@"
++ProgStr61: db "004 CHARMANDER@"
++ProgStr62: db "005 CHARMELEON@"
++ProgStr63: db "Evo CHARMANDER 16@"
++ProgStr64: db "006 CHARIZARD@"
++ProgStr65: db "Evo CHARMELEON 36@"
++ProgStr66: db "007 SQUIRTLE@"
++ProgStr67: db "008 WARTORTLE@"
++ProgStr68: db "Evolve SQUIRTLE 16@"
++ProgStr69: db "009 BLASTOISE@"
++ProgStr70: db "Evo WARTORTLE 36@"
++ProgStr71: db "010 CATERPIE@"
++ProgStr72: db "VIRIDIAN FOREST@"
++ProgStr73: db "011 METAPOD@"
++ProgStr74: db "012 BUTTERFREE@"
++ProgStr75: db "Evolve METAPOD 10@"
++ProgStr76: db "013 WEEDLE@"
++ProgStr77: db "ROUTE 2@"
++ProgStr78: db "014 KAKUNA@"
++ProgStr79: db "015 BEEDRILL@"
++ProgStr80: db "Evolve KAKUNA 10@"
++ProgStr81: db "016 PIDGEY@"
++ProgStr82: db "ROUTE 1@"
++ProgStr83: db "017 PIDGEOTTO@"
++ProgStr84: db "ROUTE 14@"
++ProgStr85: db "018 PIDGEOT@"
++ProgStr86: db "Evo PIDGEOTTO 36@"
++ProgStr87: db "019 RATTATA@"
++ProgStr88: db "020 RATICATE@"
++ProgStr89: db "ROUTE 16@"
++ProgStr90: db "021 SPEAROW@"
++ProgStr91: db "022 FEAROW@"
++ProgStr92: db "ROUTE 17@"
++ProgStr93: db "023 EKANS@"
++ProgStr94: db "ROUTE 4@"
++ProgStr95: db "024 ARBOK@"
++ProgStr96: db "ROUTE 23@"
++ProgStr97: db "025 PIKACHU@"
++ProgStr98: db "026 RAICHU@"
++ProgStr99: db "THUNDER ST.PIKACHU@"
++ProgStr100: db "027 SANDSHREW@"
++ProgStr101: db "Trade from BLUE@"
++ProgStr102: db "028 SANDSLASH@"
++ProgStr103: db "Evo SANDSHREW 22@"
++ProgStr104: db "029 NIDORAN♀@"
++ProgStr105: db "030 NIDORINA@"
++ProgStr106: db "GAME CORNER prize@"
++ProgStr107: db "031 NIDOQUEEN@"
++ProgStr108: db "MOON ST.NIDORINA@"
++ProgStr109: db "032 NIDORAN♂@"
++ProgStr110: db "033 NIDORINO@"
++ProgStr111: db "SAFARI CENTER@"
++ProgStr112: db "034 NIDOKING@"
++ProgStr113: db "MOON ST.NIDORINO@"
++ProgStr114: db "035 CLEFAIRY@"
++ProgStr115: db "MT.MOON 1F@"
++ProgStr116: db "036 CLEFABLE@"
++ProgStr117: db "MOON ST.CLEFAIRY@"
++ProgStr118: db "037 VULPIX@"
++ProgStr119: db "038 NINETALES@"
++ProgStr120: db "039 JIGGLYPUFF@"
++ProgStr121: db "ROUTE 3@"
++ProgStr122: db "040 WIGGLYTUFF@"
++ProgStr123: db "MOON ST.JIGGLYPUFF@"
++ProgStr124: db "041 ZUBAT@"
++ProgStr125: db "042 GOLBAT@"
++ProgStr126: db "SEAFOAM 1F@"
++ProgStr127: db "043 ODDISH@"
++ProgStr128: db "ROUTE 5@"
++ProgStr129: db "044 GLOOM@"
++ProgStr130: db "ROUTE 12@"
++ProgStr131: db "045 VILEPLUME@"
++ProgStr132: db "LEAF ST.GLOOM@"
++ProgStr133: db "046 PARAS@"
++ProgStr134: db "047 PARASECT@"
++ProgStr135: db "048 VENONAT@"
++ProgStr136: db "049 VENOMOTH@"
++ProgStr137: db "SAFARI ZONE NORTH@"
++ProgStr138: db "050 DIGLETT@"
++ProgStr139: db "DIGLETT'S CAVE@"
++ProgStr140: db "051 DUGTRIO@"
++ProgStr141: db "052 MEOWTH@"
++ProgStr142: db "053 PERSIAN@"
++ProgStr143: db "Evolve MEOWTH 28@"
++ProgStr144: db "054 PSYDUCK@"
++ProgStr145: db "ROUTE 4 fish@"
++ProgStr146: db "055 GOLDUCK@"
++ProgStr147: db "056 MANKEY@"
++ProgStr148: db "057 PRIMEAPE@"
++ProgStr149: db "Evolve MANKEY 28@"
++ProgStr150: db "058 GROWLITHE@"
++ProgStr151: db "ROUTE 8@"
++ProgStr152: db "059 ARCANINE@"
++ProgStr153: db "FIRE ST.GROWLITHE@"
++ProgStr154: db "060 POLIWAG@"
++ProgStr155: db "GOOD ROD@"
++ProgStr156: db "061 POLIWHIRL@"
++ProgStr157: db "ROUTE 10 fish@"
++ProgStr158: db "062 POLIWRATH@"
++ProgStr159: db "WATER ST.POLIWHIRL@"
++ProgStr160: db "063 ABRA@"
++ProgStr161: db "ROUTE 24@"
++ProgStr162: db "064 KADABRA@"
++ProgStr163: db "CERULEAN CAVE 1F@"
++ProgStr164: db "065 ALAKAZAM@"
++ProgStr165: db "Trade KADABRA@"
++ProgStr166: db "066 MACHOP@"
++ProgStr167: db "ROCK TUNNEL 1F@"
++ProgStr168: db "067 MACHOKE@"
++ProgStr169: db "VICTORY ROAD 1F@"
++ProgStr170: db "068 MACHAMP@"
++ProgStr171: db "Trade MACHOKE@"
++ProgStr172: db "069 BELLSPROUT@"
++ProgStr173: db "070 WEEPINBELL@"
++ProgStr174: db "Evo BELLSPROUT 21@"
++ProgStr175: db "071 VICTREEBEL@"
++ProgStr176: db "072 TENTACOOL@"
++ProgStr177: db "PALLET TOWN fish@"
++ProgStr178: db "073 TENTACRUEL@"
++ProgStr179: db "Evo TENTACOOL 30@"
++ProgStr180: db "074 GEODUDE@"
++ProgStr181: db "075 GRAVELER@"
++ProgStr182: db "076 GOLEM@"
++ProgStr183: db "Trade GRAVELER@"
++ProgStr184: db "077 PONYTA@"
++ProgStr185: db "MANSION 1F@"
++ProgStr186: db "078 RAPIDASH@"
++ProgStr187: db "Evolve PONYTA 40@"
++ProgStr188: db "079 SLOWPOKE@"
++ProgStr189: db "SAFARI CENTER fish@"
++ProgStr190: db "080 SLOWBRO@"
++ProgStr191: db "SEAFOAM B2F@"
++ProgStr192: db "081 MAGNEMITE@"
++ProgStr193: db "POWER PLANT@"
++ProgStr194: db "082 MAGNETON@"
++ProgStr195: db "083 FARFETCH'D@"
++ProgStr196: db "Trade VERMILION@"
++ProgStr197: db "084 DODUO@"
++ProgStr198: db "085 DODRIO@"
++ProgStr199: db "086 SEEL@"
++ProgStr200: db "087 DEWGONG@"
++ProgStr201: db "SEAFOAM B1F@"
++ProgStr202: db "088 GRIMER@"
++ProgStr203: db "089 MUK@"
++ProgStr204: db "090 SHELLDER@"
++ProgStr205: db "ROUTE 6 fish@"
++ProgStr206: db "091 CLOYSTER@"
++ProgStr207: db "WATER ST.SHELLDER@"
++ProgStr208: db "092 GASTLY@"
++ProgStr209: db "POKéMON TOWER 3F@"
++ProgStr210: db "093 HAUNTER@"
++ProgStr211: db "094 GENGAR@"
++ProgStr212: db "Trade HAUNTER@"
++ProgStr213: db "095 ONIX@"
++ProgStr214: db "096 DROWZEE@"
++ProgStr215: db "ROUTE 11@"
++ProgStr216: db "097 HYPNO@"
++ProgStr217: db "098 KRABBY@"
++ProgStr218: db "099 KINGLER@"
++ProgStr219: db "ROUTE 23 fish@"
++ProgStr220: db "100 VOLTORB@"
++ProgStr221: db "ROUTE 10@"
++ProgStr222: db "101 ELECTRODE@"
++ProgStr223: db "Trade CINNABAR LAB@"
++ProgStr224: db "102 EXEGGCUTE@"
++ProgStr225: db "103 EXEGGUTOR@"
++ProgStr226: db "LEAF ST.EXEGGCUTE@"
++ProgStr227: db "104 CUBONE@"
++ProgStr228: db "105 MAROWAK@"
++ProgStr229: db "106 HITMONLEE@"
++ProgStr230: db "Dojo gift or trade@"
++ProgStr231: db "107 HITMONCHAN@"
++ProgStr232: db "108 LICKITUNG@"
++ProgStr233: db "Trade ROUTE 18@"
++ProgStr234: db "109 KOFFING@"
++ProgStr235: db "110 WEEZING@"
++ProgStr236: db "111 RHYHORN@"
++ProgStr237: db "112 RHYDON@"
++ProgStr238: db "CERULEAN CAVE 2F@"
++ProgStr239: db "113 CHANSEY@"
++ProgStr240: db "114 TANGELA@"
++ProgStr241: db "ROUTE 21@"
++ProgStr242: db "115 KANGASKHAN@"
++ProgStr243: db "SAFARI ZONE EAST@"
++ProgStr244: db "116 HORSEA@"
++ProgStr245: db "117 SEADRA@"
++ProgStr246: db "118 GOLDEEN@"
++ProgStr247: db "119 SEAKING@"
++ProgStr248: db "FUCHSIA CITY fish@"
++ProgStr249: db "120 STARYU@"
++ProgStr250: db "ROUTE 19 fish@"
++ProgStr251: db "121 STARMIE@"
++ProgStr252: db "WATER ST.STARYU@"
++ProgStr253: db "122 MR.MIME@"
++ProgStr254: db "Trade ROUTE 2@"
++ProgStr255: db "123 SCYTHER@"
++ProgStr256: db "124 JYNX@"
++ProgStr257: db "Trade CERULEAN@"
++ProgStr258: db "125 ELECTABUZZ@"
++ProgStr259: db "126 MAGMAR@"
++ProgStr260: db "127 PINSIR@"
++ProgStr261: db "128 TAUROS@"
++ProgStr262: db "129 MAGIKARP@"
++ProgStr263: db "OLD ROD@"
++ProgStr264: db "130 GYARADOS@"
++ProgStr265: db "Evolve MAGIKARP 20@"
++ProgStr266: db "131 LAPRAS@"
++ProgStr267: db "Gift SILPH CO.7F@"
++ProgStr268: db "132 DITTO@"
++ProgStr269: db "ROUTE 13@"
++ProgStr270: db "133 EEVEE@"
++ProgStr271: db "CELADON MANSION@"
++ProgStr272: db "134 VAPOREON@"
++ProgStr273: db "WATER ST./trade@"
++ProgStr274: db "135 JOLTEON@"
++ProgStr275: db "THUNDER ST./trade@"
++ProgStr276: db "136 FLAREON@"
++ProgStr277: db "FIRE ST./trade@"
++ProgStr278: db "137 PORYGON@"
++ProgStr279: db "138 OMANYTE@"
++ProgStr280: db "Helix fossil/trade@"
++ProgStr281: db "139 OMASTAR@"
++ProgStr282: db "Evolve OMANYTE 40@"
++ProgStr283: db "140 KABUTO@"
++ProgStr284: db "Dome fossil/trade@"
++ProgStr285: db "141 KABUTOPS@"
++ProgStr286: db "Evolve KABUTO 40@"
++ProgStr287: db "142 AERODACTYL@"
++ProgStr288: db "OLD AMBER@"
++ProgStr289: db "143 SNORLAX@"
++ProgStr290: db "144 ARTICUNO@"
++ProgStr291: db "SEAFOAM B4F@"
++ProgStr292: db "145 ZAPDOS@"
++ProgStr293: db "146 MOLTRES@"
++ProgStr294: db "VICTORY ROAD 2F@"
++ProgStr295: db "147 DRATINI@"
++ProgStr296: db "148 DRAGONAIR@"
++ProgStr297: db "Evolve DRATINI 30@"
++ProgStr298: db "149 DRAGONITE@"
++ProgStr299: db "Evo DRAGONAIR 55@"
++ProgStr300: db "150 MEWTWO@"
++ProgStr301: db "CERULEAN CAVE B1F@"
++ProgStr302: db "151 MEW@"
++ProgStr303: db "Event only@"
++ProgStr304: db "POTION@"
++ProgStr305: db "PC in your room@"
++ProgStr306: db "ANTIDOTE@"
++ProgStr307: db "POKé BALL@"
++ProgStr308: db "MOON STONE@"
++ProgStr309: db "RARE CANDY@"
++ProgStr310: db "ESCAPE ROPE@"
++ProgStr311: db "TM12 WATER GUN@"
++ProgStr312: db "HP UP@"
++ProgStr313: db "TM01 MEGA PUNCH@"
++ProgStr314: db "TM04 WHIRLWIND@"
++ProgStr315: db "TM45 THUNDER WAVE@"
++ProgStr316: db "TM08 BODY SLAM@"
++ProgStr317: db "S.S.ANNE 1F ROOMS@"
++ProgStr318: db "MAX ETHER@"
++ProgStr319: db "S.S.ANNE 2F ROOMS@"
++ProgStr320: db "ETHER@"
++ProgStr321: db "S.S.ANNE B1F ROOM@"
++ProgStr322: db "TM44 REST@"
++ProgStr323: db "MAX POTION@"
++ProgStr324: db "TM19 SEISMIC TOSS@"
++ProgStr325: db "TM30 TELEPORT@"
++ProgStr326: db "ROUTE 9@"
++ProgStr327: db "ELIXER@"
++ProgStr328: db "POKéMON TOWER 4F@"
++ProgStr329: db "AWAKENING@"
++ProgStr330: db "NUGGET@"
++ProgStr331: db "POKéMON TOWER 5F@"
++ProgStr332: db "ROCKET HIDEOUT B1@"
++ProgStr333: db "HYPER POTION@"
++ProgStr334: db "ROCKET HIDEOUT B2@"
++ProgStr335: db "TM07 HORN DRILL@"
++ProgStr336: db "SUPER POTION@"
++ProgStr337: db "TM10 DOUBLE-EDGE@"
++ProgStr338: db "ROCKET HIDEOUT B3@"
++ProgStr339: db "TM02 RAZOR WIND@"
++ProgStr340: db "IRON@"
++ProgStr341: db "LIFT KEY@"
++ProgStr342: db "SILPH SCOPE@"
++ProgStr343: db "X ACCURACY@"
++ProgStr344: db "TM20 RAGE@"
++ProgStr345: db "ROUTE 15@"
++ProgStr346: db "FULL RESTORE@"
++ProgStr347: db "CARBOS@"
++ProgStr348: db "TM37 EGG BOMB@"
++ProgStr349: db "PROTEIN@"
++ProgStr350: db "TM40 SKULL BASH@"
++ProgStr351: db "SAFARI ZONE WEST@"
++ProgStr352: db "TM32 DOUBLE TEAM@"
++ProgStr353: db "MAX REVIVE@"
++ProgStr354: db "GOLD TEETH@"
++ProgStr355: db "TM16 PAY DAY@"
++ProgStr356: db "CALCIUM@"
++ProgStr357: db "MANSION 2F@"
++ProgStr358: db "MANSION 3F@"
++ProgStr359: db "MANSION B1F@"
++ProgStr360: db "TM14 BLIZZARD@"
++ProgStr361: db "TM22 SOLARBEAM@"
++ProgStr362: db "SECRET KEY@"
++ProgStr363: db "TM25 THUNDER@"
++ProgStr364: db "TM33 REFLECT@"
++ProgStr365: db "SILPH CO.3F@"
++ProgStr366: db "FULL HEAL@"
++ProgStr367: db "SILPH CO.4F@"
++ProgStr368: db "TM09 TAKE DOWN@"
++ProgStr369: db "SILPH CO.5F@"
++ProgStr370: db "CARD KEY@"
++ProgStr371: db "SILPH CO.6F@"
++ProgStr372: db "TM03 SWORDS DANCE@"
++ProgStr373: db "TM26 EARTHQUAKE@"
++ProgStr374: db "SILPH CO.10F@"
++ProgStr375: db "REVIVE@"
++ProgStr376: db "TM43 SKY ATTACK@"
++ProgStr377: db "TM17 SUBMISSION@"
++ProgStr378: db "TM05 MEGA KICK@"
++ProgStr379: db "GUARD SPEC.@"
++ProgStr380: db "VICTORY ROAD 3F@"
++ProgStr381: db "TM47 EXPLOSION@"
++ProgStr382: db "MAX ELIXER@"
++ProgStr383: db "PP UP@"
++ProgStr384: db "ULTRA BALL@"
++ProgStr385: db "10 COINS@"
++ProgStr386: db "GAME CORNER floor@"
++ProgStr387: db "20 COINS@"
++ProgStr388: db "40 COINS@"
++ProgStr389: db "100 COINS@"
++ProgStr390: db "VIRIDIAN CITY@"
++ProgStr391: db "GREAT BALL@"
++ProgStr392: db "UNDERGROUND N-S@"
++ProgStr393: db "X SPECIAL@"
++ProgStr394: db "S.S.ANNE KITCHEN@"
++ProgStr395: db "UNDERGROUND W-E@"
++ProgStr396: db "CELADON CITY@"
++ProgStr397: db "VERMILION CITY@"
++ProgStr398: db "SEAFOAM B3F@"
++ProgStr399: db "COPYCAT'S HOUSE@"
++ProgStr400: db "SILPH CO.9F@"
++ProgStr401: db "POKé BALL x5@"
++ProgStr402: db "OAK'S LAB, 0 BALLS@"
++ProgStr403: db "TOWN MAP@"
++ProgStr404: db "BLUE'S HOUSE@"
++ProgStr405: db "TM34 BIDE@"
++ProgStr406: db "DOME/HELIX FOSSIL@"
++ProgStr407: db "BIKE VOUCHER@"
++ProgStr408: db "POKéMON FAN CLUB@"
++ProgStr409: db "BICYCLE@"
++ProgStr410: db "BIKE SHOP@"
++ProgStr411: db "TM11 BUBBLEBEAM@"
++ProgStr412: db "TM42 DREAM EATER@"
++ProgStr413: db "MUSEUM 1F@"
++ProgStr414: db "TM18 COUNTER@"
++ProgStr415: db "CELADON MART 3F@"
++ProgStr416: db "TM13 ICE BEAM@"
++ProgStr417: db "CELADON MART ROOF@"
++ProgStr418: db "TM48 ROCK SLIDE@"
++ProgStr419: db "TM49 TRI ATTACK@"
++ProgStr420: db "COIN CASE@"
++ProgStr421: db "CELADON DINER@"
++ProgStr422: db "HM05 FLASH@"
++ProgStr423: db "ROUTE 2 GATE@"
++ProgStr424: db "GAME CORNER@"
++ProgStr425: db "ITEMFINDER@"
++ProgStr426: db "ROUTE 11 GATE@"
++ProgStr427: db "TM24 THUNDERBOLT@"
++ProgStr428: db "TM28 DIG@"
++ProgStr429: db "TM21 MEGA DRAIN@"
++ProgStr430: db "TM39 SWIFT@"
++ProgStr431: db "ROUTE 12 GATE@"
++ProgStr432: db "SUPER ROD@"
++ProgStr433: db "ROUTE 12 HOUSE@"
++ProgStr434: db "HM02 FLY@"
++ProgStr435: db "ROUTE 16 HOUSE@"
++ProgStr436: db "FUCHSIA CITY@"
++ProgStr437: db "EXP.ALL@"
++ProgStr438: db "ROUTE 15 GATE@"
++ProgStr439: db "TM06 TOXIC@"
++ProgStr440: db "TM41 SOFTBOILED@"
++ProgStr441: db "TM35 METRONOME@"
++ProgStr442: db "CINNABAR LAB@"
++ProgStr443: db "TM31 MIMIC@"
++ProgStr444: db "TM29 PSYCHIC@"
++ProgStr445: db "MR.PSYCHIC'S HOUSE@"
++ProgStr446: db "TM36 SELFDESTRUCT@"
++ProgStr447: db "SILPH CO.2F@"
++ProgStr448: db "MASTER BALL@"
++ProgStr449: db "TM46 PSYWAVE@"
++ProgStr450: db "TM38 FIRE BLAST@"
++ProgStr451: db "TM27 FISSURE@"
++ProgStr452: db "DIPLOMA@"
++ProgStr453: db "CELADON MANSION 3F@"
++ProgStr454: db "RIVAL@"
++ProgStr455: db "BUG CATCHER@"
++ProgStr456: db "JR.TRAINER♂@"
++ProgStr457: db "YOUNGSTER@"
++ProgStr458: db "LASS@"
++ProgStr459: db "HIKER@"
++ProgStr460: db "SUPER NERD@"
++ProgStr461: db "ROCKET@"
++ProgStr462: db "JR.TRAINER♀@"
++ProgStr463: db "SWIMMER@"
++ProgStr464: db "ROUTE 6@"
++ProgStr465: db "GAMBLER@"
++ProgStr466: db "ENGINEER@"
++ProgStr467: db "GENTLEMAN@"
++ProgStr468: db "S.S.ANNE 2F@"
++ProgStr469: db "FISHERMAN@"
++ProgStr470: db "SAILOR@"
++ProgStr471: db "S.S.ANNE BOW@"
++ProgStr472: db "ROCKER@"
++ProgStr473: db "POKéMANIAC@"
++ProgStr474: db "ROCK TUNNEL B1F@"
++ProgStr475: db "CHANNELER@"
++ProgStr476: db "BEAUTY@"
++ProgStr477: db "COOLTRAINER♀@"
++ProgStr478: db "BIRD KEEPER@"
++ProgStr479: db "BIKER@"
++ProgStr480: db "CUE BALL@"
++ProgStr481: db "JUGGLER@"
++ProgStr482: db "TAMER@"
++ProgStr483: db "ROUTE 18@"
++ProgStr484: db "ROUTE 19@"
++ProgStr485: db "ROUTE 20@"
++ProgStr486: db "SCIENTIST@"
++ProgStr487: db "BURGLAR@"
++ProgStr488: db "BLACKBELT@"
++ProgStr489: db "FIGHTING DOJO@"
++ProgStr490: db "KARATE MASTER@"
++ProgStr491: db "SILPH CO.8F@"
++ProgStr492: db "PSYCHIC@"
++ProgStr493: db "COOLTRAINER♂@"
++ProgStr494: db "NIDORAN♂▶NIDORAN♀@"
++ProgStr495: db "ROUTE 5 TUNNEL@"
++ProgStr496: db "SPEAROW▶FARFETCH'D@"
++ProgStr497: db "ABRA▶MR.MIME@"
++ProgStr498: db "ROUTE 2 HOUSE@"
++ProgStr499: db "NIDORINO▶NIDORINA@"
++ProgStr500: db "POLIWHIRL▶JYNX@"
++ProgStr501: db "RAICHU▶ELECTRODE@"
++ProgStr502: db "VENONAT▶TANGELA@"
++ProgStr503: db "PONYTA▶SEEL@"
++ProgStr504: db "SLOWBRO▶LICKITUNG@"
++ProgStr505: db "ROUTE 18 GATE@"
++ProgStr506: db "MAGIKARP@"
++ProgStr507: db "MT.MOON CENTER@"
++ProgStr508: db "EEVEE@"
++ProgStr509: db "SNORLAX@"
++ProgStr510: db "ZAPDOS@"
++ProgStr511: db "VOLTORB@"
++ProgStr512: db "ELECTRODE@"
++ProgStr513: db "OMANYTE/KABUTO@"
++ProgStr514: db "Fossil, CINNABAR@"
++ProgStr515: db "AERODACTYL@"
++ProgStr516: db "Amber, CINNABAR@"
++ProgStr517: db "ARTICUNO@"
++ProgStr518: db "HITMONLEE/CHAN@"
++ProgStr519: db "LAPRAS@"
++ProgStr520: db "MOLTRES@"
++ProgStr521: db "MEWTWO@"
++ProgStr522: db "PALLET TOWN@"
++ProgStr523: db "Go there once@"
++ProgStr524: db "PEWTER CITY@"
++ProgStr525: db "LAVENDER TOWN@"
++ProgStr526: db "CINNABAR ISLAND@"
++ProgStr527: db "SAFFRON CITY@"
++ProgStr528: db "You can take only@"
++ProgStr529: db "one of the three.@"
++ProgStr530: db "The rest: trades.@"
++ProgStr531: db "Choose with care!@"
++ProgStr532: db "Beating BROCK ends@"
++ProgStr533: db "the first rival@"
++ProgStr534: db "fight on ROUTE 22.@"
++ProgStr535: db "Fight him first!@"
++ProgStr536: db "Only one fossil:@"
++ProgStr537: db "DOME or HELIX. The@"
++ProgStr538: db "other: a trade.@"
++ProgStr539: db "Getting HM01 here@"
++ProgStr540: db "makes the S.S.ANNE@"
++ProgStr541: db "sail when you go.@"
++ProgStr542: db "Finish it first!@"
++ProgStr543: db "The S.S.ANNE sails@"
++ProgStr544: db "for good as soon@"
++ProgStr545: db "as you step off.@"
++ProgStr546: db "If this SNORLAX@"
++ProgStr547: db "faints, it is@"
++ProgStr548: db "gone for good.@"
++ProgStr549: db "SAVE before it!@"
++ProgStr550: db "Only one gift:@"
++ProgStr551: db "HITMONLEE or@"
++ProgStr552: db "HITMONCHAN.@"
++ProgStr553: db "Beating GIOVANNI@"
++ProgStr554: db "makes every ROCKET@"
++ProgStr555: db "leave SILPH CO.@"
++ProgStr556: db "Beat them first!@"
++ProgStr557: db "ZAPDOS is here.@"
++ProgStr558: db "If it faints, it@"
++ProgStr559: db "is gone for good.@"
++ProgStr560: db "ARTICUNO is here.@"
++ProgStr561: db "MOLTRES is here.@"
++ProgStr562: db "MEWTWO is here.@"
+diff --git a/engine/menus/start_sub_menus.asm b/engine/menus/start_sub_menus.asm
+index 817dceb..b102c26 100644
+--- a/engine/menus/start_sub_menus.asm
++++ b/engine/menus/start_sub_menus.asm
+@@ -806,3 +806,23 @@ SwitchPartyMon_InitVarOrSwapData:
+ 	pop de
+ 	pop hl
+ 	ret
++
++; OPTION, PROGRESS and EXIT, in the bank's free space so nothing above moves
++PUSHS
++SECTION "Start Menu Progress", ROMX, BANK[$04]
++
++StartMenu_OptionOrProgress::
++	cp 5
++	jp z, StartMenu_Option
++	cp 6
++	jp nz, CloseStartMenu
++	xor a
++	ldh [hAutoBGTransferEnabled], a
++	call ClearScreen
++	call UpdateSprites
++	callfar ProgressMenu
++	call LoadScreenTilesFromBuffer2
++	call LoadTextBoxTilePatterns
++	call UpdateSprites
++	jp RedisplayStartMenu
++POPS
+diff --git a/home.asm b/home.asm
+index 201a0a2..43d62ef 100644
+--- a/home.asm
++++ b/home.asm
+@@ -82,3 +82,8 @@ INCLUDE "home/random.asm"
+ INCLUDE "home/predef.asm"
+ INCLUDE "home/hidden_events.asm"
+ INCLUDE "home/predef_text.asm"
++
++
++SECTION "Progress HUD", ROM0
++
++INCLUDE "home/progress_hud.asm"
+diff --git a/home/overworld.asm b/home/overworld.asm
+index a25fff0..41d1b5b 100644
+--- a/home/overworld.asm
++++ b/home/overworld.asm
+@@ -79,8 +79,10 @@ OverworldLoopLessDelay::
+ 	ldh [hTextID], a
+ 	jp .displayDialogue
+ .startButtonNotPressed
+-	bit B_PAD_A, a
+-	jp z, .checkIfDownButtonIsPressed
++	jp ProgressSelectHook ; SELECT can show the PROGRESS objective; A and the d-pad as before
++	nop ; keeps everything below where it was
++	nop
++.aButtonPressed
+ ; if A is pressed
+ 	ld a, [wStatusFlags5]
+ 	bit BIT_UNKNOWN_5_2, a
+diff --git a/home/progress_hud.asm b/home/progress_hud.asm
+new file mode 100644
+index 0000000..c78d68c
+--- /dev/null
++++ b/home/progress_hud.asm
+@@ -0,0 +1,13 @@
++; Each frame the player stands on the map: the PROGRESS warning for a newly entered map, or
++; the next objective on SELECT (In-game HUD set to YES). Both live in ProgressOverworld.
++; Reached by a jump from OverworldLoopLessDelay.startButtonNotPressed, with a = buttons.
++ProgressSelectHook::
++	ld b, a
++	push bc
++	farcall ProgressOverworld
++	pop bc
++	jp c, OverworldLoop ; a box was shown
++	ld a, b
++	bit B_PAD_A, a
++	jp z, OverworldLoopLessDelay.checkIfDownButtonIsPressed
++	jp OverworldLoopLessDelay.aButtonPressed
+diff --git a/home/start_menu.asm b/home/start_menu.asm
+index 9504d53..a374b57 100644
+--- a/home/start_menu.asm
++++ b/home/start_menu.asm
+@@ -25,7 +25,7 @@ RedisplayStartMenu::
+ 	jr nz, .loop
+ ; if the player pressed tried to go past the top item, wrap around to the bottom
+ 	CheckEvent EVENT_GOT_POKEDEX
+-	ld a, 6 ; there are 7 menu items with the pokedex, so the max index is 6
++	ld a, 7 ; there are 8 menu items with the pokedex, so the max index is 7
+ 	jr nz, .wrapMenuItemId
+ 	dec a ; there are only 6 menu items without the pokedex
+ .wrapMenuItemId
+@@ -38,7 +38,7 @@ RedisplayStartMenu::
+ ; if the player pressed tried to go past the bottom item, wrap around to the top
+ 	CheckEvent EVENT_GOT_POKEDEX
+ 	ld a, [wCurrentMenuItem]
+-	ld c, 7 ; there are 7 menu items with the pokedex
++	ld c, 8 ; there are 8 menu items with the pokedex
+ 	jr nz, .checkIfPastBottom
+ 	dec c ; there are only 6 menu items without the pokedex
+ .checkIfPastBottom
+@@ -72,10 +72,11 @@ RedisplayStartMenu::
+ 	jp z, StartMenu_TrainerInfo
+ 	cp 4
+ 	jp z, StartMenu_SaveReset
+-	cp 5
+-	jp z, StartMenu_Option
++	jp StartMenu_OptionOrProgress ; OPTION, PROGRESS or EXIT
++	nop ; keeps CloseStartMenu where it was
++	nop
+ 
+-; EXIT falls through to here
++; EXIT jumps here
+ CloseStartMenu::
+ 	call Joypad
+ 	ldh a, [hJoyPressed]
+diff --git a/main.asm b/main.asm
+index 951afdc..4412e9b 100644
+--- a/main.asm
++++ b/main.asm
+@@ -354,3 +354,8 @@ INCLUDE "data/battle_anims/frame_blocks.asm"
+ INCLUDE "engine/movie/evolution.asm"
+ INCLUDE "engine/overworld/elevator.asm"
+ INCLUDE "engine/items/tm_prices.asm"
++
++
++SECTION "Progress Menu", ROMX, BANK[$2D]
++
++INCLUDE "engine/menus/progress.asm"
+diff --git a/ram/wram.asm b/ram/wram.asm
+index 2d3a350..40c0163 100644
+--- a/ram/wram.asm
++++ b/ram/wram.asm
+@@ -2255,3 +2255,25 @@ SECTION "Stack", WRAM0
+ wStack:: db
+ 
+ ENDSECTION
++
++
++SECTION "Progress Menu RAM", WRAM0
++
++; PROGRESS start menu option (engine/menus/progress.asm)
++wProgCursor::   db
++wProgCat::      db
++wProgRow::      db
++wProgPct::      db
++wProgScroll::   dw
++wProgDone::     dw
++wProgTotal::    dw
++wProgLeft::     dw
++wProgSumDone::  dw
++wProgSumTotal:: dw ; must follow wProgSumDone
++wProgPrint::    dw ; big-endian copy for PrintNumber
++wProgBestGate::  db ; ProgressFindNext
++wProgBestOrder:: db
++wProgBestPtr::   dw
++wProgScanCat::   db
++wProgNextCat::   db
++wProgLastMap::   db ; the map the PROGRESS warnings last looked at
